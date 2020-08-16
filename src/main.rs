@@ -23,7 +23,7 @@ fn main() {
     let pool = r2d2::Pool::new(manager).unwrap();
 
     tx.send(Url::parse("http://leonroth.de/").unwrap()).unwrap();
-    
+
     for _ in 0..NTHREADS{
         let thread_tx = tx.clone();
         let thread_rx = rx.clone();
@@ -67,6 +67,7 @@ fn main() {
                 });
 
                 let text: Vec<String> = document.find(Name("p")).chain(document.find(Name("h1"))).chain(document.find(Name("h2"))).chain(document.find(Name("h3"))).chain(document.find(Name("h4"))).chain(document.find(Name("h5"))).map(|f| f.text().replace("\n", "").replace("\t","").replace("     ", "")).collect();
+                // see file:///Users/leon/.rustup/toolchains/stable-x86_64-apple-darwin/share/doc/rust/html/std/primitive.slice.html#method.join
                 let mut text_string = "".to_string();
                 for string in text.clone(){
                     text_string.push_str(" ");
@@ -79,7 +80,7 @@ fn main() {
                     Ok(ok_val) => {
                         for row in ok_val {
                             let date : NaiveDate  = row.get(0);
-                            println!("Scraped_today: {}, Today {}, bool: {}",date, chrono::Utc::today().naive_utc(),date == chrono::Utc::today().naive_utc());
+                            //println!("Scraped_today: {}, Today {}, bool: {}",date, chrono::Utc::today().naive_utc(),date == chrono::Utc::today().naive_utc());
                             if date ==  chrono::Utc::today().naive_utc(){
                                 scraped_today_flag = true;
                             }
@@ -91,6 +92,7 @@ fn main() {
                 }
 
                 for new_url in new_urls{
+                    //db_client.execute("INSERT INTO base_urls (url,link_urls) VALUES ($1,ARRAY[$2]) ON CONFLICT (url) DO UPDATE SET link_urls = array_append(base_urls.link_urls,$2) WHERE $2 <> ANY (base_urls.link_urls)",&[&url.host_str().unwrap(),&new_url.host_str().unwrap()]).unwrap();
                     if backfeed_num >= 10 || thread_tx.is_full() || scraped_today_flag{
                         //println!("not sending in channel! backfeed: {}, tx.full: {}, scraped_today: {}",backfeed_num >= 5,thread_tx.is_full(),scraped_today_flag);
                         continue;
@@ -110,9 +112,7 @@ fn main() {
     }
     loop{
         thread::sleep(std::time::Duration::from_millis(2000));
-        let last_duration: u64 = scraped_last_duration.load(std::sync::atomic::Ordering::SeqCst);
-        scraped_last_duration.store(0, std::sync::atomic::Ordering::SeqCst);
-
-        println!("Scraped total: {}, Scraped Real: {}, Scraped per Minute: {}, Scraped last duration: {}",scraped_count.load(std::sync::atomic::Ordering::SeqCst),real_scraped_count.load(std::sync::atomic::Ordering::Relaxed),last_duration* 50,last_duration);
+        let last_duration: u64 = scraped_last_duration.swap(0,std::sync::atomic::Ordering::SeqCst);
+        println!("Scraped total: {}, Scraped Real: {}, Scraped per Minute: {}, Scraped last duration: {}",scraped_count.load(std::sync::atomic::Ordering::SeqCst),real_scraped_count.load(std::sync::atomic::Ordering::Relaxed),last_duration* 30,last_duration);
     }
 }
