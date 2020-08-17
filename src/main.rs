@@ -1,4 +1,3 @@
-use chrono::NaiveDate;
 use crossbeam_channel::bounded;
 use postgres::NoTls;
 use r2d2_postgres::PostgresConnectionManager;
@@ -12,9 +11,8 @@ static NTHREADS: usize = 16;
 
 // TODO: make table for scraped sites with timestamp || make table for base url relations and compute 'PageRank' :]
 fn main() {
-    let (tx, rx) = bounded(1000);
+    let (tx, rx) = bounded(100);
     let scraped_count: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-    let real_scraped_count = Arc::new(AtomicU64::new(0));
     let scraped_last_duration = Arc::new(AtomicU64::new(0));
 
     let manager = PostgresConnectionManager::new(
@@ -26,21 +24,16 @@ fn main() {
     tx.send(Url::parse("http://leonroth.de/").unwrap()).unwrap();
 
     for _ in 0..NTHREADS {
-        let thread_tx = tx.clone();
         let thread_rx = rx.clone();
         let pool = pool.clone();
         let scraped_count = scraped_count.clone();
         let scraped_last_duration = scraped_last_duration.clone();
-        let real_scraped_count = real_scraped_count.clone();
 
         thread::spawn(move || {
             println!("Starting Up New Thread");
-            loop {
+            for url in thread_rx  {
                 let mut db_client = pool.get().unwrap();
-                let url: Url = thread_rx.recv().unwrap();
                 //println!("Scraping: {}",&url);
-                let mut backfeed_num: usize = 0;
-                let mut scraped_today_flag = false;
 
                 let body = reqwest::blocking::get(url.as_str()).unwrap();
 
@@ -92,41 +85,51 @@ fn main() {
                 }
 
                 let db_res= db_client.query("WITH before AS (SELECT * FROM websites_v2 WHERE url = $1 ), inserted AS (INSERT INTO websites_v2 (url,text,last_scraped) VALUES ($1,$2,NOW()) ON CONFLICT (url) DO UPDATE SET popularity = websites_v2.popularity + 1, last_scraped = NOW(), text = $2 WHERE websites_v2.url = $1) SELECT last_scraped FROM before;",&[&url.as_str(),&text_string.get(..100).to_owned()]);
-
                 match &db_res {
-                    Ok(ok_val) => {
-                        for row in ok_val {
-                            let date: NaiveDate = row.get(0);
-                            //println!("Scraped_today: {}, Today {}, bool: {}",date, chrono::Utc::today().naive_utc(),date == chrono::Utc::today().naive_utc());
-                            if date == chrono::Utc::today().naive_utc() {
-                                scraped_today_flag = true;
-                            }
-                        }
-                    }
+                    Ok(_) => {}
                     Err(err) => println!("Error: {}", err),
                 }
 
                 for new_url in new_urls {
-                    //db_client.execute("INSERT INTO base_urls (url,link_urls) VALUES ($1,ARRAY[$2]) ON CONFLICT (url) DO UPDATE SET link_urls = array_append(base_urls.link_urls,$2) WHERE $2 <> ANY (base_urls.link_urls)",&[&url.host_str().unwrap(),&new_url.host_str().unwrap()]).unwrap();
-                    if backfeed_num >= 10 || thread_tx.is_full() || scraped_today_flag {
-                        //println!("not sending in channel! backfeed: {}, tx.full: {}, scraped_today: {}",backfeed_num >= 5,thread_tx.is_full(),scraped_today_flag);
-                        continue;
-                    } else {
-                        thread_tx.send(new_url).unwrap();
-                        backfeed_num += 1;
-                    }
+                    db_client.query("INSERT INTO crawl_queue_v2 (url,timestamp,status) VALUES ($1,current_timestamp - interval '1 day' ,$2) ON CONFLICT (url) DO NOTHING",&[&new_url.as_str(),&"queued"]).unwrap();
                 }
+
+                let db_res = db_client.execute("UPDATE crawl_queue_v2 SET status = 'queued' , timestamp = current_timestamp WHERE url = $1",&[&url.as_str()]);
+                match &db_res {
+                    Ok(_) => {}
+                    Err(err) => println!("Error: {}", err),
+                }
+
                 scraped_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 scraped_last_duration.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                if !scraped_today_flag {
-                    real_scraped_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
             }
         });
     }
+    // getting new Urls from Table 'crawl_queue_v2' :]
+    thread::spawn(move || {
+        let mut db_client = pool.clone().get().unwrap();
+        let thread_tx = tx.clone();
+        loop {
+            let db_res = db_client.query("UPDATE crawl_queue_v2 SET status = 'processing' WHERE url IN (SELECT url FROM crawl_queue_v2 WHERE status = 'queued' ORDER BY timestamp ASC LIMIT 50) RETURNING * ;",&[]);
+            match db_res {
+                Ok(db_ok) => {
+                    // println!("{:?}",db_ok)
+                    for row in db_ok{
+                        thread_tx.send(Url::parse(row.get(0)).unwrap()).unwrap();
+                    }
+                }
+                Err(err) => {
+                    println!("{}",err);
+                    continue;
+                }
+            }
+            println!("getting new for sending!");
+        }
+    });
+    // printing crawl speed and what was crawled :]
     loop {
         thread::sleep(std::time::Duration::from_millis(2000));
         let last_duration: u64 = scraped_last_duration.swap(0, std::sync::atomic::Ordering::SeqCst);
-        println!("Scraped total: {}, Scraped Real: {}, Scraped per Minute: {}, Scraped last duration: {}",scraped_count.load(std::sync::atomic::Ordering::SeqCst),real_scraped_count.load(std::sync::atomic::Ordering::Relaxed),last_duration* 30,last_duration);
+        println!("Scraped total: {}, Scraped per Minute: {}, Scraped last duration: {}",scraped_count.load(std::sync::atomic::Ordering::SeqCst),last_duration* 30,last_duration);
     }
 }
