@@ -31,7 +31,7 @@ fn main() {
 
         thread::spawn(move || {
             println!("Starting Up New Thread");
-            for url in thread_rx  {
+            for url in thread_rx {
                 let mut db_client = pool.get().unwrap();
                 //println!("Scraping: {}",&url);
 
@@ -114,12 +114,12 @@ fn main() {
             match db_res {
                 Ok(db_ok) => {
                     // println!("{:?}",db_ok)
-                    for row in db_ok{
+                    for row in db_ok {
                         thread_tx.send(Url::parse(row.get(0)).unwrap()).unwrap();
                     }
                 }
                 Err(err) => {
-                    println!("{}",err);
+                    println!("{}", err);
                     continue;
                 }
             }
@@ -130,6 +130,11 @@ fn main() {
     loop {
         thread::sleep(std::time::Duration::from_millis(2000));
         let last_duration: u64 = scraped_last_duration.swap(0, std::sync::atomic::Ordering::SeqCst);
-        println!("Scraped total: {}, Scraped per Minute: {}, Scraped last duration: {}",scraped_count.load(std::sync::atomic::Ordering::SeqCst),last_duration* 30,last_duration);
+        println!(
+            "Scraped total: {}, Scraped per Minute: {}, Scraped last duration: {}",
+            scraped_count.load(std::sync::atomic::Ordering::SeqCst),
+            last_duration * 30,
+            last_duration
+        );
     }
 }
