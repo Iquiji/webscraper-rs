@@ -8,6 +8,7 @@ use std::{collections::BTreeSet, thread};
 use url::Url;
 
 static NTHREADS: usize = 16;
+static DURATION: u64 = 2000;
 
 // TODO: make table for scraped sites with timestamp || make table for base url relations and compute 'PageRank' :]
 fn main() {
@@ -128,12 +129,12 @@ fn main() {
     });
     // printing crawl speed and what was crawled :]
     loop {
-        thread::sleep(std::time::Duration::from_millis(2000));
+        thread::sleep(std::time::Duration::from_millis(DURATION));
         let last_duration: u64 = scraped_last_duration.swap(0, std::sync::atomic::Ordering::SeqCst);
         println!(
             "Scraped total: {}, Scraped per Minute: {}, Scraped last duration: {}",
             scraped_count.load(std::sync::atomic::Ordering::SeqCst),
-            last_duration * 30,
+            last_duration * (60000 / DURATION),
             last_duration
         );
     }
