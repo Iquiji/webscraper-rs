@@ -117,7 +117,7 @@ fn main() {
                     text_string.push_str(&string);
                 }
                 // ADD to websites_v2
-                let db_res= db_client.query("WITH before AS (SELECT * FROM websites_v2 WHERE url = $1 ), inserted AS (INSERT INTO websites_v2 (url,text,last_scraped) VALUES ($1,$2,NOW()) ON CONFLICT (url) DO UPDATE SET last_scraped = NOW(), text = $2 WHERE websites_v2.url = $1) SELECT last_scraped FROM before;",&[&url.as_str(),&text_string.get(..100).to_owned()]);
+                let db_res= db_client.query("WITH before AS (SELECT * FROM websites_v2 WHERE url = $1 ), inserted AS (INSERT INTO websites_v2 (url,text,last_scraped,text_tsvector) VALUES ($1,$2,NOW(),to_tsvector('english',$2 AS document)) ON CONFLICT (url) DO UPDATE SET last_scraped = NOW(), text = $2 , text_tsvector = to_tsvector('english',$2 AS document) WHERE websites_v2.url = $1) SELECT last_scraped FROM before;",&[&url.as_str(),&text_string.get(..100).to_owned()]);
                 match &db_res {
                     Ok(_) => {}
                     Err(err) => println!("Error: {}", err),
