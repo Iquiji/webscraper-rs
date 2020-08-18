@@ -3,15 +3,14 @@ use postgres::NoTls;
 use r2d2_postgres::PostgresConnectionManager;
 use select::document::Document;
 use select::predicate::{Name, Predicate};
+use std::env;
 use std::sync::{atomic::AtomicU64, Arc};
 use std::{collections::BTreeSet, thread};
 use url::Url;
-use std::env;
 
 static DURATION: u64 = 5000;
 // TODO: make table for scraped sites with timestamp || make table for base url relations and compute 'PageRank' :]
 fn main() {
-
     let (tx, rx) = bounded(100);
     let scraped_count: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let scraped_last_duration = Arc::new(AtomicU64::new(0));
@@ -25,10 +24,12 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.contains(&"-c".to_owned()) {
         println!("only computing Weights");
-        compute_rank(pool.clone().get().unwrap(),true);
+        compute_rank(pool.clone().get().unwrap(), true);
         return;
     }
-    let n_threads: usize = args[1].parse().expect("No Valid number for n_threads in ARGS");
+    let n_threads: usize = args[1]
+        .parse()
+        .expect("No Valid number for n_threads in ARGS");
 
     tx.send(Url::parse("http://leonroth.de/").unwrap()).unwrap();
 
@@ -50,18 +51,23 @@ fn main() {
             for url in thread_rx {
                 let db_try = pool.get();
                 let mut db_client = match db_try {
-                    Err(err) => { eprintln!("{}",err);continue;}
-                    Ok(ok) =>{ok}
+                    Err(err) => {
+                        eprintln!("{}", err);
+                        continue;
+                    }
+                    Ok(ok) => ok,
                 };
                 // let mut db_client = pool.get().unwrap(); // Why does this fail sometimes ?!
 
                 //println!("Scraping: {}",&url);
 
                 let body = match reqwest::blocking::get(url.as_str()) {
-                    Ok(response) => {response}
-                    Err(err) => {eprintln!("{}",err);continue;}
+                    Ok(response) => response,
+                    Err(err) => {
+                        eprintln!("{}", err);
+                        continue;
+                    }
                 };
-
 
                 let document_res = Document::from_read(std::io::Read::take(body, 1048576));
                 let document: Document;
@@ -79,18 +85,23 @@ fn main() {
                     .find(Name("a"))
                     .filter_map(|n| n.attr("href"))
                     .map(|x| {
-                        let res_url =if x.starts_with("http") {
+                        let res_url = if x.starts_with("http") {
                             Url::parse(x).unwrap()
                         } else {
                             url.join(x).unwrap()
                         };
-                        let res_url_query =  res_url.query();
-                        if res_url_query.is_some(){
-                            Url::parse(&res_url.as_str().to_owned().replace(res_url.query().unwrap(), "")).unwrap()
-                        }else{
+                        let res_url_query = res_url.query();
+                        if res_url_query.is_some() {
+                            Url::parse(
+                                &res_url
+                                    .as_str()
+                                    .to_owned()
+                                    .replace(res_url.query().unwrap(), ""),
+                            )
+                            .unwrap()
+                        } else {
                             res_url
                         }
-                        
                     })
                     .collect();
 
@@ -123,29 +134,42 @@ fn main() {
                     Err(err) => println!("Error: {}", err),
                 }
                 // make target base urls
-                let target_base_urls: BTreeSet<Url> = new_urls.clone().into_iter().map(|target_url| { Url::parse(&(target_url.scheme().to_owned() + "://" + target_url.host_str().unwrap_or_else(|| "example.com") + "/")).unwrap()}).collect();
+                let target_base_urls: BTreeSet<Url> = new_urls
+                    .clone()
+                    .into_iter()
+                    .map(|target_url| {
+                        Url::parse(
+                            &(target_url.scheme().to_owned()
+                                + "://"
+                                + target_url.host_str().unwrap_or_else(|| "example.com")
+                                + "/"),
+                        )
+                        .unwrap()
+                    })
+                    .collect();
 
-                // insert into crawl_queue_v2 with timestamp - 30 day to prioritize
+                // insert into crawl_queue_v2 with timestamp NULL
                 for new_url in new_urls {
                     db_client.query("INSERT INTO crawl_queue_v2 (url,timestamp,status) VALUES ($1,NULL,$2) ON CONFLICT (url) DO NOTHING",&[&new_url.as_str(),&"queued"]).unwrap();
                 }
 
                 // insert into base_url_links
                 for target_url in target_base_urls {
-                    if target_url.host_str().unwrap() == url.host_str().unwrap(){
+                    if target_url.host_str().unwrap() == url.host_str().unwrap() {
                         continue;
-                    }else if target_url.host_str().unwrap() == "example.com"{
+                    } else if target_url.host_str().unwrap() == "example.com" {
                         eprintln!("Failed to parse host url because it contains 'example.com'");
                         continue;
                     }
                     //println!("{}",target_url);
-                    let db_res = db_client.query("WITH inserted AS ( INSERT INTO base_url_links (base_url,target_url) VALUES ($1,$2) ON CONFLICT (base_url,target_url) DO NOTHING ) UPDATE websites_v2 SET popularity = websites_v2.popularity + 1 WHERE url LIKE '%' || $2 || '%' ;",&[&Url::parse(&(url.scheme().to_owned() + "://" + url.host_str().unwrap() + "/")).unwrap().as_str(),&target_url.as_str()]);
+                    let db_res = db_client.query("WITH inserted AS ( INSERT INTO base_url_links (base_url,target_url) VALUES ($1,$2) ON CONFLICT (base_url,target_url) DO NOTHING RETURNING target_url) UPDATE websites_v2 SET popularity = websites_v2.popularity + 1 FROM inserted WHERE url LIKE inserted.target_url || '%' ;",
+                        &[&Url::parse(&(url.scheme().to_owned() + "://" + url.host_str().unwrap() + "/")).unwrap().as_str(),&target_url.as_str()]);
                     match db_res {
                         Ok(_) => {
                             //println!("{:?}",db_ok);
                         }
-                        Err(err) =>{
-                            println!("{}",err);
+                        Err(err) => {
+                            println!("{}", err);
                             continue;
                         }
                     }
@@ -163,7 +187,10 @@ fn main() {
             }
         });
     }
-    println!("Started Up {} new Threads for handling the channel",n_threads);
+    println!(
+        "Started Up {} new Threads for handling the channel",
+        n_threads
+    );
     // getting new Urls from Table 'crawl_queue_v2' :]
     let inputer_pool = pool.clone();
     thread::spawn(move || {
@@ -171,7 +198,7 @@ fn main() {
         let thread_tx = tx.clone();
         println!("Send Thread Starting Up");
         loop {
-            let db_res = db_client.query("UPDATE crawl_queue_v2 SET status = 'processing' WHERE url IN (SELECT url FROM crawl_queue_v2 WHERE status = 'queued' ORDER BY timestamp ASC NULLS FIRST LIMIT 50) RETURNING * ;",&[]);
+            let db_res = db_client.query("UPDATE crawl_queue_v2 SET status = 'processing' WHERE url = ANY (SELECT url FROM crawl_queue_v2 WHERE status = 'queued' ORDER BY timestamp ASC NULLS FIRST LIMIT 50) RETURNING * ;",&[]);
             match db_res {
                 Ok(db_ok) => {
                     // println!("{:?}",db_ok)
@@ -188,16 +215,17 @@ fn main() {
         }
     });
     // weight updater thread:
-    thread::spawn(move || {
-        loop{
-            thread::sleep(std::time::Duration::from_secs(120));
-            let db_try = pool.get();
-            let db_client = match db_try {
-                    Err(err) => { eprintln!("{}",err);continue;}
-                    Ok(ok) =>{ok}
-                };
-            compute_rank(db_client,true);
-        }
+    thread::spawn(move || loop {
+        thread::sleep(std::time::Duration::from_secs(120));
+        let db_try = pool.get();
+        let db_client = match db_try {
+            Err(err) => {
+                eprintln!("{}", err);
+                continue;
+            }
+            Ok(ok) => ok,
+        };
+        compute_rank(db_client, true);
     });
     // printing crawl speed and what was crawled :]
     loop {
@@ -212,7 +240,12 @@ fn main() {
     }
 }
 
-fn compute_rank(mut db_client: r2d2::PooledConnection<r2d2_postgres::PostgresConnectionManager<tokio_postgres::tls::NoTls>>,on_db : bool) {
+fn compute_rank(
+    mut db_client: r2d2::PooledConnection<
+        r2d2_postgres::PostgresConnectionManager<tokio_postgres::tls::NoTls>,
+    >,
+    on_db: bool,
+) {
     if on_db {
         // TO INSERT query!
         db_client.execute(r#"WITH target_info AS(SELECT target_url,count(1)AS count,SUM(weight)AS total_weight FROM base_url_links GROUP BY target_url),updated_links AS(UPDATE base_url_links SET weight=(target_info.total_weight/count)*0.85 FROM target_info WHERE base_url=target_info.target_url)UPDATE websites_v2 SET"rank"=target_info.total_weight FROM target_info WHERE url LIKE target_info.target_url||'%';"#,&[]).unwrap();
@@ -223,15 +256,18 @@ fn compute_rank(mut db_client: r2d2::PooledConnection<r2d2_postgres::PostgresCon
     let mut total_updated = 0;
 
     let mut websites: BTreeSet<String> = BTreeSet::new();
-    match db_client.query("SELECT * FROM websites_v2 ORDER BY last_scraped DESC LIMIT 1000",&[]){
+    match db_client.query(
+        "SELECT * FROM websites_v2 ORDER BY last_scraped DESC LIMIT 1000",
+        &[],
+    ) {
         Ok(val) => {
             for row in val {
-                let url : String = row.get(0);
+                let url: String = row.get(0);
                 websites.insert(url);
             }
         }
         Err(err) => {
-            println!("{}",err);
+            println!("{}", err);
             panic!();
         }
     };
@@ -262,7 +298,7 @@ fn compute_rank(mut db_client: r2d2::PooledConnection<r2d2_postgres::PostgresCon
 
         // make weight of our website
         let total_weight = all_weights.into_iter().sum::<f64>() * 0.85;
-        
+
         // get how many links to from website exist
         let how_many_links = db_client.query("SELECT COUNT(*) FROM base_url_links WHERE base_url = $1",&[&base_url]).unwrap();
         let mut linkage_count : i64 = 0;
@@ -285,5 +321,9 @@ fn compute_rank(mut db_client: r2d2::PooledConnection<r2d2_postgres::PostgresCon
         //println!("Setting url: {} to weight: {}, total of {} links get weight: {}",&url,total_weight,linkage_count,weight_per_link);
         total_updated += 1;
     });
-    println!("Updated {} Websites in {} seconds",total_updated,now.elapsed().as_secs());
+    println!(
+        "Updated {} Websites in {} seconds",
+        total_updated,
+        now.elapsed().as_secs()
+    );
 }
