@@ -215,7 +215,7 @@ fn main() {
 fn compute_rank(mut db_client: r2d2::PooledConnection<r2d2_postgres::PostgresConnectionManager<tokio_postgres::tls::NoTls>>,on_db : bool) {
     if on_db {
         // TO INSERT query!
-        db_client.query("",&[]).unwrap();
+        db_client.execute(r#"WITH target_info AS(SELECT target_url,count(1)AS count,SUM(weight)AS total_weight FROM base_url_links GROUP BY target_url),updated_links AS(UPDATE base_url_links SET weight=(target_info.total_weight/count)*0.85 FROM target_info WHERE base_url=target_info.target_url)UPDATE websites_v2 SET"rank"=target_info.total_weight FROM target_info WHERE url LIKE target_info.target_url||'%';"#,&[]).unwrap();
         return;
     }
     println!("Computing new Weights/Ranks...");
