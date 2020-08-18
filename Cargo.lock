@@ -1635,6 +1635,7 @@ dependencies = [
  "r2d2_postgres",
  "reqwest",
  "select",
+ "tokio-postgres",
  "url",
 ]
 
