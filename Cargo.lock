@@ -1804,6 +1804,7 @@ dependencies = [
 name = "webscraper-rs"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chrono",
  "crossbeam-channel",
  "futures",

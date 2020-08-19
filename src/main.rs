@@ -7,6 +7,8 @@ use std::sync::{atomic::AtomicU64, Arc};
 use std::{collections::BTreeSet, thread, error::Error};
 use url::Url;
 use structopt::StructOpt;
+use futures::{TryStreamExt, StreamExt, stream::iter};
+use bytes::Bytes;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "webscraper-rs",version = "0.2",author = "Iquiji yt.failerbot.3000@gmail.com")]
@@ -23,8 +25,9 @@ struct Opt {
 }
 
 static DURATION: u64 = 5000;
-// TODO: async :/
-fn main(){
+
+#[tokio::main]
+async fn main() -> Result<(),Box<dyn Error>>{
     let opt = Opt::from_args();
     //println!("{:?}", opt);
     let (tx, rx) = bounded(100);
@@ -38,130 +41,105 @@ fn main(){
     );
     let pool = r2d2::Pool::new(manager).unwrap();
 
+    let (db_client, connection) =
+        tokio_postgres::connect("host=free-db.coy5e9jykzwm.eu-central-1.rds.amazonaws.com user=postgres port=5432 password=Rd7rko$g85GV^&%123", NoTls).await?;
+    let db_client= Arc::new(db_client);
+
+    // The connection object performs the actual communication with the database,
+    // so spawn it off to run on its own.
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
     if opt.compute_only {
         println!("only computing Weights");
         compute_rank(pool.clone().get().unwrap(), true);
-        return;
+        return Ok(());
     }
 
     tx.send(Url::parse("http://leonroth.de/").unwrap()).unwrap();
-
-    for _ in 0..opt.n_threads {
-        let thread_rx = rx.clone();
-        let pool = pool.clone();
-        let scraped_count = scraped_count.clone();
-        let scraped_last_duration = scraped_last_duration.clone();
-        let error_count = error_count.clone();
-
-        thread::spawn(move || {
-            // let mut db_client_try = pool.try_get();
-            // while db_client_try.is_none(){
-            //     println!("Error: failed to get db_client waiting 1000ms before retry");
-            //     thread::sleep(std::time::Duration::from_millis(1000));
-            //     db_client_try = pool.try_get();
-            // }
-
-            // let mut db_client = db_client_try.unwrap();
-            for url in thread_rx {
-                let db_try = pool.get();
-                let db_client = match db_try {
-                    Err(err) => {
-                        eprintln!("{}", err);
-                        continue;
-                    }
-                    Ok(ok) => ok,
-                };
-
-                match scrape_url(url.clone(),db_client) {
-                    Ok(_) => {
-                        scraped_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        scraped_last_duration.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    }
-                    Err(err) => {
-                        let db_try = pool.get();
-                        let mut db_client = match db_try {
-                            Err(err) => {
-                                eprintln!("{}", err);
-                                continue;
-                            }
-                            Ok(ok) => ok,
-                        };
-
-                        eprintln!("failed to scrape with error: {}",err);
-                        db_client.execute("UPDATE crawl_queue_v2 SET status = 'queued' WHERE url = $1",&[&url.as_str()]).unwrap();
-                        error_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                };
-                
-            }
-        });
-    }
-    println!(
-        "Started Up {} new Threads for handling the channel",
-        opt.n_threads
-    );
-    // getting new Urls from Table 'crawl_queue_v2' :]
-    let inputer_pool = pool.clone();
-    thread::spawn(move || {
-        let mut db_client = inputer_pool.clone().get().unwrap();
-        let thread_tx = tx.clone();
-        println!("Send Thread Starting Up");
-        loop {
-            let db_res = db_client.query("UPDATE crawl_queue_v2 SET status = 'processing' WHERE url = ANY (SELECT url FROM crawl_queue_v2 WHERE status = 'queued' ORDER BY timestamp ASC NULLS FIRST LIMIT 50) RETURNING * ;",&[]);
-            match db_res {
-                Ok(db_ok) => {
-                    // println!("{:?}",db_ok)
-                    for row in db_ok {
-                        thread_tx.send(Url::parse(row.get(0)).unwrap()).unwrap();
-                    }
-                }
-                Err(err) => {
-                    println!("{}", err);
-                    continue;
+    
+    let db_client_unfold = db_client.clone();
+    let db_client_2 = db_client.clone();
+    let url_worker_fut = futures::stream::unfold( (),|()| async {
+        let mut urls: Vec<url::Url> = vec![];
+        let db_res = db_client_unfold.query("UPDATE crawl_queue_v2 SET status = 'processing' WHERE url = ANY (SELECT url FROM crawl_queue_v2 WHERE status = 'queued' ORDER BY timestamp ASC NULLS FIRST LIMIT 50) RETURNING * ;",&[]).await;
+        match db_res {
+            Ok(db_ok) => {
+                // println!("{:?}",db_ok)
+                for row in db_ok {
+                    urls.push(Url::parse(row.get(0)).unwrap());
                 }
             }
-            //println!("getting new for sending!");
-        }
-    });
-    // weight updater thread:
-    thread::spawn(move || loop {
-        thread::sleep(std::time::Duration::from_secs(120));
-        let db_try = pool.get();
-        let db_client = match db_try {
             Err(err) => {
                 eprintln!("{}", err);
-                continue;
             }
-            Ok(ok) => ok,
+        }
+        Some((iter(urls),()))
+    }).flatten().map(|url| async {
+        let url = url;
+        match scrape_url(url.clone(),&db_client).await {
+            Ok(_) => {
+                scraped_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                scraped_last_duration.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Err(err) => {
+                eprintln!("failed to scrape with error: {}",err);
+                // ignore db errors in error handling...
+                let _ = db_client.execute("UPDATE crawl_queue_v2 SET status = 'queued' WHERE url = $1",&[&url.as_str()]).await;
+                error_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         };
-        compute_rank(db_client, true);
-    });
-    // printing crawl speed and what was crawled :]
-    loop {
-        thread::sleep(std::time::Duration::from_millis(DURATION));
-        let last_duration: u64 = scraped_last_duration.swap(0, std::sync::atomic::Ordering::SeqCst);
-        println!(
-            "Scraped total: {}, Scraped per Minute: {}, Scraped last duration: {}, Error count: {}",
-            scraped_count.load(std::sync::atomic::Ordering::SeqCst),
-            last_duration * (60000 / DURATION),
-            last_duration,
-            error_count.load(std::sync::atomic::Ordering::Relaxed)
-        );
-    }
-    // Ok(()) - not needed because of infinite loop above :)
+    }).buffer_unordered(opt.n_threads).for_each(|()| async {});
+
+    Ok(url_worker_fut.await)
+
+    // weight updater thread:
+    // thread::spawn(move || loop {
+    //     thread::sleep(std::time::Duration::from_secs(120));
+    //     let db_try = pool.get();
+    //     let db_client = match db_try {
+    //         Err(err) => {
+    //             eprintln!("{}", err);
+    //             continue;
+    //         }
+    //         Ok(ok) => ok,
+    //     };
+    //     compute_rank(db_client, true);
+    // });
+    // // printing crawl speed and what was crawled :]
+    // loop {
+    //     thread::sleep(std::time::Duration::from_millis(DURATION));
+    //     let last_duration: u64 = scraped_last_duration.swap(0, std::sync::atomic::Ordering::SeqCst);
+    //     println!(
+    //         "Scraped total: {}, Scraped per Minute: {}, Scraped last duration: {}, Error count: {}",
+    //         scraped_count.load(std::sync::atomic::Ordering::SeqCst),
+    //         last_duration * (60000 / DURATION),
+    //         last_duration,
+    //         error_count.load(std::sync::atomic::Ordering::Relaxed)
+    //     );
+    // }
 }
 
-fn scrape_url(url: url::Url,mut db_client: r2d2::PooledConnection<
-    r2d2_postgres::PostgresConnectionManager<tokio_postgres::tls::NoTls>,
->) -> Result<(),Box<dyn Error>>{
+async fn scrape_url(url: url::Url,db_client: &tokio_postgres::Client) -> Result<(),Box<dyn Error>>{
     let hostname = Url::parse(&(url.scheme().to_owned() + "://" + url.host_str().unwrap() + "/"))?;
     // let mut db_client = pool.get().unwrap(); // Why does this fail sometimes ?!
 
     //println!("Scraping: {}",&url);
 
-    let body = reqwest::blocking::get(url.as_str())?;
+    let resp = reqwest::get(url.as_str()).await?;
+    let body: Vec<u8> = resp.bytes_stream().try_fold(Vec::new(), |mut body, chunk| {
+        if body.len() < 1024*1024*1024 {
+            body.extend(&chunk);
+        }
+        async {
+            Ok(body)
+        }
+    }).await?;
 
-    let document = Document::from_read(std::io::Read::take(body, 1048576))?;
+    let document = Document::from_read(&*body)?;
 
     let new_urls: BTreeSet<_> = document
         .find(Name("a"))
@@ -213,7 +191,7 @@ fn scrape_url(url: url::Url,mut db_client: r2d2::PooledConnection<
         text_string.push_str(&string);
     }
     // ADD to websites_v2
-    db_client.query("WITH before AS (SELECT * FROM websites_v2 WHERE url = $1 ), inserted AS (INSERT INTO websites_v2 (url,text,last_scraped,text_tsvector,hostname) VALUES ($1,$2,NOW(),to_tsvector('english',$2),$3) ON CONFLICT (url) DO UPDATE SET last_scraped = NOW(), text = $2 , text_tsvector = to_tsvector('english',$2) WHERE websites_v2.url = $1) SELECT last_scraped FROM before;",&[&url.as_str(),&text_string.get(..(text_string.chars().map(|_| 1).sum::<usize>()).max(10000)).to_owned(),&hostname.as_str()])?;
+    db_client.query("WITH before AS (SELECT * FROM websites_v2 WHERE url = $1 ), inserted AS (INSERT INTO websites_v2 (url,text,last_scraped,text_tsvector,hostname) VALUES ($1,$2,NOW(),to_tsvector('english',$2),$3) ON CONFLICT (url) DO UPDATE SET last_scraped = NOW(), text = $2 , text_tsvector = to_tsvector('english',$2) WHERE websites_v2.url = $1) SELECT last_scraped FROM before;",&[&url.as_str(),&text_string.get(..(text_string.chars().map(|_| 1).sum::<usize>()).max(10000)).to_owned(),&hostname.as_str()]).await?;
 
     // make target base urls
     let target_base_urls: BTreeSet<Url> = new_urls
@@ -232,7 +210,7 @@ fn scrape_url(url: url::Url,mut db_client: r2d2::PooledConnection<
 
     // insert into crawl_queue_v2 with timestamp NULL
     for new_url in new_urls {
-        db_client.query("INSERT INTO crawl_queue_v2 (url,timestamp,status) VALUES ($1,NULL,$2) ON CONFLICT (url) DO NOTHING",&[&new_url.as_str(),&"queued"])?;
+        db_client.query("INSERT INTO crawl_queue_v2 (url,timestamp,status) VALUES ($1,NULL,$2) ON CONFLICT (url) DO NOTHING",&[&new_url.as_str(),&"queued"]).await?;
     }
 
     // insert into base_url_links
@@ -245,7 +223,7 @@ fn scrape_url(url: url::Url,mut db_client: r2d2::PooledConnection<
         }
         //println!("{}",target_url);
         let db_res = db_client.query("WITH inserted AS ( INSERT INTO base_url_links (base_url,target_url) VALUES ($1,$2) ON CONFLICT (base_url,target_url) DO NOTHING RETURNING target_url) UPDATE websites_v2 SET popularity = websites_v2.popularity + 1 FROM inserted WHERE hostname = inserted.target_url;",
-            &[&Url::parse(&(url.scheme().to_owned() + "://" + url.host_str().unwrap() + "/")).unwrap().as_str(),&target_url.as_str()]);
+            &[&Url::parse(&(url.scheme().to_owned() + "://" + url.host_str().unwrap() + "/")).unwrap().as_str(),&target_url.as_str()]).await;
         match db_res {
             Ok(_) => {
                 //println!("{:?}",db_ok);
@@ -258,7 +236,7 @@ fn scrape_url(url: url::Url,mut db_client: r2d2::PooledConnection<
     }
 
     // Update crawl_queue_v2 to say finishged crawling back in queue with timestamp now
-    db_client.execute("UPDATE crawl_queue_v2 SET status = 'queued' , timestamp = current_timestamp WHERE url = $1",&[&url.as_str()])?;
+    db_client.execute("UPDATE crawl_queue_v2 SET status = 'queued' , timestamp = current_timestamp WHERE url = $1",&[&url.as_str()]).await?;
 
     Ok(())
 }
