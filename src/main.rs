@@ -11,10 +11,13 @@ use structopt::StructOpt;
 #[derive(Debug, StructOpt)]
 #[structopt(name = "webscraper-rs",version = "0.2",author = "Iquiji yt.failerbot.3000@gmail.com")]
 struct Opt {
+    /// Number of Threads
     #[structopt(short, long, default_value = "1")]
     n_threads: usize,
+    /// Start Url
     #[structopt(short, long)]
     url: Option<String>,
+    /// Only Compute Weights/Ranks
     #[structopt(short)]
     compute_only: bool
 }
