@@ -3,14 +3,27 @@ use postgres::NoTls;
 use r2d2_postgres::PostgresConnectionManager;
 use select::document::Document;
 use select::predicate::{Name, Predicate};
-use std::env;
 use std::sync::{atomic::AtomicU64, Arc};
 use std::{collections::BTreeSet, thread, error::Error};
 use url::Url;
+use structopt::StructOpt;
+
+#[derive(Debug, StructOpt)]
+#[structopt(name = "webscraper-rs",version = "0.2",author = "Iquiji yt.failerbot.3000@gmail.com")]
+struct Opt {
+    #[structopt(short, long, default_value = "1")]
+    n_threads: usize,
+    #[structopt(short, long)]
+    url: Option<String>,
+    #[structopt(short)]
+    compute_only: bool
+}
 
 static DURATION: u64 = 5000;
 // TODO: async :/
 fn main(){
+    let opt = Opt::from_args();
+    //println!("{:?}", opt);
     let (tx, rx) = bounded(100);
     let scraped_count: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let scraped_last_duration = Arc::new(AtomicU64::new(0));
@@ -22,19 +35,15 @@ fn main(){
     );
     let pool = r2d2::Pool::new(manager).unwrap();
 
-    let args: Vec<String> = env::args().collect();
-    if args.contains(&"-c".to_owned()) {
+    if opt.compute_only {
         println!("only computing Weights");
         compute_rank(pool.clone().get().unwrap(), true);
         return;
     }
-    let n_threads: usize = args[1]
-        .parse()
-        .expect("No Valid number for n_threads in ARGS");
 
     tx.send(Url::parse("http://leonroth.de/").unwrap()).unwrap();
 
-    for _ in 0..n_threads {
+    for _ in 0..opt.n_threads {
         let thread_rx = rx.clone();
         let pool = pool.clone();
         let scraped_count = scraped_count.clone();
@@ -86,7 +95,7 @@ fn main(){
     }
     println!(
         "Started Up {} new Threads for handling the channel",
-        n_threads
+        opt.n_threads
     );
     // getting new Urls from Table 'crawl_queue_v2' :]
     let inputer_pool = pool.clone();
