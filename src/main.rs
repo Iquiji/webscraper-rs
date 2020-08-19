@@ -9,7 +9,7 @@ use std::{collections::BTreeSet, thread, error::Error};
 use url::Url;
 
 static DURATION: u64 = 5000;
-// TODO: make table for scraped sites with timestamp || make table for base url relations and compute 'PageRank' :]
+// TODO: async :/
 fn main(){
     let (tx, rx) = bounded(100);
     let scraped_count: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
