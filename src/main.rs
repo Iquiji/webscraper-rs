@@ -1,27 +1,27 @@
-use crossbeam_channel::bounded;
+use tokio::time::delay_for;
 use postgres::NoTls;
-use r2d2_postgres::PostgresConnectionManager;
 use select::document::Document;
 use select::predicate::{Name, Predicate};
 use std::sync::{atomic::AtomicU64, Arc};
-use std::{collections::BTreeSet, thread, error::Error};
+use std::{collections::BTreeSet, error::Error};
 use url::Url;
 use structopt::StructOpt;
-use futures::{TryStreamExt, StreamExt, stream::iter};
-use bytes::Bytes;
+use futures::{TryStreamExt, StreamExt, stream::iter,join};
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, StructOpt,Clone)]
 #[structopt(name = "webscraper-rs",version = "0.2",author = "Iquiji yt.failerbot.3000@gmail.com")]
 struct Opt {
     /// Number of Threads
     #[structopt(short, long, default_value = "1")]
-    n_threads: usize,
+    n_workers: usize,
     /// Start Url
     #[structopt(short, long)]
     url: Option<String>,
     /// Only Compute Weights/Ranks
     #[structopt(short)]
-    compute_only: bool
+    compute_only: bool,
+    #[structopt(short, long)]
+    verbose: bool
 }
 
 static DURATION: u64 = 5000;
@@ -30,16 +30,9 @@ static DURATION: u64 = 5000;
 async fn main() -> Result<(),Box<dyn Error>>{
     let opt = Opt::from_args();
     //println!("{:?}", opt);
-    let (tx, rx) = bounded(100);
     let scraped_count: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let scraped_last_duration = Arc::new(AtomicU64::new(0));
     let error_count = Arc::new(AtomicU64::new(0));
-
-    let manager = PostgresConnectionManager::new(
-        "host=free-db.coy5e9jykzwm.eu-central-1.rds.amazonaws.com user=postgres port=5432 password=Rd7rko$g85GV^&%123".parse().unwrap(),
-        NoTls,
-    );
-    let pool = r2d2::Pool::new(manager).unwrap();
 
     let (db_client, connection) =
         tokio_postgres::connect("host=free-db.coy5e9jykzwm.eu-central-1.rds.amazonaws.com user=postgres port=5432 password=Rd7rko$g85GV^&%123", NoTls).await?;
@@ -55,17 +48,14 @@ async fn main() -> Result<(),Box<dyn Error>>{
 
     if opt.compute_only {
         println!("only computing Weights");
-        compute_rank(pool.clone().get().unwrap(), true);
+        compute_rank(&db_client, true).await;
         return Ok(());
     }
-
-    tx.send(Url::parse("http://leonroth.de/").unwrap()).unwrap();
     
     let db_client_unfold = db_client.clone();
-    let db_client_2 = db_client.clone();
     let url_worker_fut = futures::stream::unfold( (),|()| async {
         let mut urls: Vec<url::Url> = vec![];
-        let db_res = db_client_unfold.query("UPDATE crawl_queue_v2 SET status = 'processing' WHERE url = ANY (SELECT url FROM crawl_queue_v2 WHERE status = 'queued' ORDER BY timestamp ASC NULLS FIRST LIMIT 50) RETURNING * ;",&[]).await;
+        let db_res = db_client_unfold.query("UPDATE crawl_queue_v2 SET status = 'processing' WHERE url = ANY (SELECT url FROM crawl_queue_v2 WHERE status = 'queued' ORDER BY timestamp ASC NULLS FIRST,error_count ASC LIMIT 50) RETURNING * ;",&[]).await;
         match db_res {
             Ok(db_ok) => {
                 // println!("{:?}",db_ok)
@@ -86,45 +76,49 @@ async fn main() -> Result<(),Box<dyn Error>>{
                 scraped_last_duration.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             Err(err) => {
-                eprintln!("failed to scrape with error: {}",err);
+                if opt.verbose {
+                    eprintln!("failed to scrape with error: {}",err);
+                }
                 // ignore db errors in error handling...
-                let _ = db_client.execute("UPDATE crawl_queue_v2 SET status = 'queued' WHERE url = $1",&[&url.as_str()]).await;
+                let _ = db_client.execute("UPDATE crawl_queue_v2 SET status = 'queued' , error_count = crawl_queue_v2.error_count + 1 WHERE url = $1",&[&url.as_str()]).await;
                 error_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         };
-    }).buffer_unordered(opt.n_threads).for_each(|()| async {});
+    }).buffer_unordered(opt.n_workers).for_each(|()| async {});
 
-    Ok(url_worker_fut.await)
+    //weight updater task:
+    let db_weight_updater = db_client.clone();
+    let weight_updater = tokio::spawn(async move{
+        loop {
+            delay_for(std::time::Duration::from_secs(120)).await;
+            compute_rank(&db_weight_updater, true).await;
+        }
+    });
 
-    // weight updater thread:
-    // thread::spawn(move || loop {
-    //     thread::sleep(std::time::Duration::from_secs(120));
-    //     let db_try = pool.get();
-    //     let db_client = match db_try {
-    //         Err(err) => {
-    //             eprintln!("{}", err);
-    //             continue;
-    //         }
-    //         Ok(ok) => ok,
-    //     };
-    //     compute_rank(db_client, true);
-    // });
-    // // printing crawl speed and what was crawled :]
-    // loop {
-    //     thread::sleep(std::time::Duration::from_millis(DURATION));
-    //     let last_duration: u64 = scraped_last_duration.swap(0, std::sync::atomic::Ordering::SeqCst);
-    //     println!(
-    //         "Scraped total: {}, Scraped per Minute: {}, Scraped last duration: {}, Error count: {}",
-    //         scraped_count.load(std::sync::atomic::Ordering::SeqCst),
-    //         last_duration * (60000 / DURATION),
-    //         last_duration,
-    //         error_count.load(std::sync::atomic::Ordering::Relaxed)
-    //     );
-    // }
+    // printing crawl speed and what was crawled :]
+    let printer_scraped_last_duration = scraped_last_duration.clone();
+    let printer_scraped_count = scraped_count.clone();
+    let printer_error_count = error_count.clone();
+    let printer = tokio::spawn(async move {
+        loop {
+            delay_for(std::time::Duration::from_millis(DURATION)).await;
+            let last_duration: u64 = printer_scraped_last_duration.swap(0, std::sync::atomic::Ordering::SeqCst);
+            println!(
+                "Scraped total: {}, Scraped per Minute: {}, Scraped last duration: {}, Error count: {}",
+                printer_scraped_count.load(std::sync::atomic::Ordering::SeqCst),
+                last_duration * (60000 / DURATION),
+                last_duration,
+                printer_error_count.load(std::sync::atomic::Ordering::Relaxed)
+            );
+        }
+    });
+    join!(url_worker_fut,weight_updater,printer);
+    Ok(())
 }
 
 async fn scrape_url(url: url::Url,db_client: &tokio_postgres::Client) -> Result<(),Box<dyn Error>>{
-    let hostname = Url::parse(&(url.scheme().to_owned() + "://" + url.host_str().unwrap() + "/"))?;
+    let host_str = url.host_str().ok_or(core::fmt::Error)?;
+    let hostname = Url::parse(&(url.scheme().to_owned() + "://" + host_str + "/"))?;
     // let mut db_client = pool.get().unwrap(); // Why does this fail sometimes ?!
 
     //println!("Scraping: {}",&url);
@@ -241,89 +235,84 @@ async fn scrape_url(url: url::Url,db_client: &tokio_postgres::Client) -> Result<
     Ok(())
 }
 
-fn compute_rank(
-    mut db_client: r2d2::PooledConnection<
-        r2d2_postgres::PostgresConnectionManager<tokio_postgres::tls::NoTls>,
-    >,
-    on_db: bool,
-) {
+async fn compute_rank(db_client: &tokio_postgres::Client,on_db: bool) {
+    println!("Computing new Weights/Ranks...");
     if on_db {
-        db_client.execute(r#"WITH target_info AS(SELECT target_url,count(1)AS count,SUM(weight)AS total_weight FROM base_url_links GROUP BY target_url),updated_links AS(UPDATE base_url_links SET weight=(target_info.total_weight/count)*0.85 FROM target_info WHERE base_url=target_info.target_url)UPDATE websites_v2 SET"rank"=target_info.total_weight FROM target_info WHERE hostname = target_info.target_url;"#,&[]).unwrap();
+        db_client.execute(r#"WITH target_info AS(SELECT target_url,count(1)AS count,SUM(weight)AS total_weight FROM base_url_links GROUP BY target_url),updated_links AS(UPDATE base_url_links SET weight=(target_info.total_weight/count)*0.85 FROM target_info WHERE base_url=target_info.target_url)UPDATE websites_v2 SET"rank"=target_info.total_weight FROM target_info WHERE hostname = target_info.target_url;"#,&[]).await.unwrap();
         return;
     }
-    println!("Computing new Weights/Ranks...");
-    let now = std::time::Instant::now();
-    let mut total_updated = 0;
+    // let now = std::time::Instant::now();
+    // let mut total_updated = 0;
 
-    let mut websites: BTreeSet<String> = BTreeSet::new();
-    match db_client.query(
-        "SELECT * FROM websites_v2 ORDER BY last_scraped DESC LIMIT 1000",
-        &[],
-    ) {
-        Ok(val) => {
-            for row in val {
-                let url: String = row.get(0);
-                websites.insert(url);
-            }
-        }
-        Err(err) => {
-            println!("{}", err);
-            panic!();
-        }
-    };
-    websites.into_iter().for_each(|url | {
-        let mut all_weights : Vec<f64> = vec![];
-        let mut all_weights_with_linkage : Vec<(String,String,f64)> = vec![];
-        let url_as_url =Url::parse(&url).unwrap();
-        let mut base_url : String = "".to_owned();
+    // let mut websites: BTreeSet<String> = BTreeSet::new();
+    // match db_client.query(
+    //     "SELECT * FROM websites_v2 ORDER BY last_scraped DESC LIMIT 1000",
+    //     &[],
+    // ) {
+    //     Ok(val) => {
+    //         for row in val {
+    //             let url: String = row.get(0);
+    //             websites.insert(url);
+    //         }
+    //     }
+    //     Err(err) => {
+    //         println!("{}", err);
+    //         panic!();
+    //     }
+    // };
+    // websites.into_iter().for_each(|url | {
+    //     let mut all_weights : Vec<f64> = vec![];
+    //     let mut all_weights_with_linkage : Vec<(String,String,f64)> = vec![];
+    //     let url_as_url =Url::parse(&url).unwrap();
+    //     let mut base_url : String = "".to_owned();
 
-        // get all links where target_url == our website
+    //     // get all links where target_url == our website
 
-        match db_client.query("SELECT weight,base_url,target_url FROM base_url_links WHERE target_url LIKE '%' || $1 ||'%';",&[&Url::parse(&(url_as_url.scheme().to_owned() + "://" + url_as_url.host_str().unwrap() + "/")).unwrap().as_str()]){
-            Ok(val) => {
-                for row in val {
-                    let weight : f64 = row.get(0);
-                    base_url = row.get(1);
-                    let target_url : String = row.get(2);
+    //     match db_client.query("SELECT weight,base_url,target_url FROM base_url_links WHERE target_url LIKE '%' || $1 ||'%';",&[&Url::parse(&(url_as_url.scheme().to_owned() + "://" + url_as_url.host_str().unwrap() + "/")).unwrap().as_str()]){
+    //         Ok(val) => {
+    //             for row in val {
+    //                 let weight : f64 = row.get(0);
+    //                 base_url = row.get(1);
+    //                 let target_url : String = row.get(2);
 
-                    all_weights.push(weight);
+    //                 all_weights.push(weight);
 
-                    all_weights_with_linkage.push((base_url.clone(),target_url,weight));
-                }
-            }
-            Err(err) => {
-                panic!(err);
-            }
-        };
+    //                 all_weights_with_linkage.push((base_url.clone(),target_url,weight));
+    //             }
+    //         }
+    //         Err(err) => {
+    //             panic!(err);
+    //         }
+    //     };
 
-        // make weight of our website
-        let total_weight = all_weights.into_iter().sum::<f64>() * 0.85;
+    //     // make weight of our website
+    //     let total_weight = all_weights.into_iter().sum::<f64>() * 0.85;
 
-        // get how many links to from website exist
-        let how_many_links = db_client.query("SELECT COUNT(*) FROM base_url_links WHERE base_url = $1",&[&base_url]).unwrap();
-        let mut linkage_count : i64 = 0;
+    //     // get how many links to from website exist
+    //     let how_many_links = db_client.query("SELECT COUNT(*) FROM base_url_links WHERE base_url = $1",&[&base_url]).unwrap();
+    //     let mut linkage_count : i64 = 0;
 
-        for row in how_many_links{
-            linkage_count = row.get(0);
-        }
+    //     for row in how_many_links{
+    //         linkage_count = row.get(0);
+    //     }
 
-        // get weight per link by total_weight/linkage count
-        let weight_per_link : f64;
-        if linkage_count != 0 {
-            weight_per_link = total_weight / linkage_count as f64;
-        }else{
-            weight_per_link = 0.05
-        }
-        // set weight of all links where base url == our website to weight per link
-        db_client.query("UPDATE base_url_links SET weight = $2 WHERE base_url = $1",&[&base_url,&weight_per_link]).unwrap(); 
-        // set rank/weight of our website
-        db_client.execute("UPDATE websites_v2 SET rank = $2 WHERE url = $1",&[&url,&total_weight]).unwrap();
-        //println!("Setting url: {} to weight: {}, total of {} links get weight: {}",&url,total_weight,linkage_count,weight_per_link);
-        total_updated += 1;
-    });
-    println!(
-        "Updated {} Websites in {} seconds",
-        total_updated,
-        now.elapsed().as_secs()
-    );
+    //     // get weight per link by total_weight/linkage count
+    //     let weight_per_link : f64;
+    //     if linkage_count != 0 {
+    //         weight_per_link = total_weight / linkage_count as f64;
+    //     }else{
+    //         weight_per_link = 0.05
+    //     }
+    //     // set weight of all links where base url == our website to weight per link
+    //     db_client.query("UPDATE base_url_links SET weight = $2 WHERE base_url = $1",&[&base_url,&weight_per_link]).unwrap(); 
+    //     // set rank/weight of our website
+    //     db_client.execute("UPDATE websites_v2 SET rank = $2 WHERE url = $1",&[&url,&total_weight]).unwrap();
+    //     //println!("Setting url: {} to weight: {}, total of {} links get weight: {}",&url,total_weight,linkage_count,weight_per_link);
+    //     total_updated += 1;
+    // });
+    // println!(
+    //     "Updated {} Websites in {} seconds",
+    //     total_updated,
+    //     now.elapsed().as_secs()
+    // );
 }
