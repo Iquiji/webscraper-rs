@@ -1,15 +1,19 @@
-use tokio::time::delay_for;
+use futures::{join, stream::iter, StreamExt, TryStreamExt};
 use postgres::NoTls;
 use select::document::Document;
 use select::predicate::{Name, Predicate};
 use std::sync::{atomic::AtomicU64, Arc};
 use std::{collections::BTreeSet, error::Error};
-use url::Url;
 use structopt::StructOpt;
-use futures::{TryStreamExt, StreamExt, stream::iter,join};
+use tokio::time::delay_for;
+use url::Url;
 
-#[derive(Debug, StructOpt,Clone)]
-#[structopt(name = "webscraper-rs",version = "0.3.1",author = "Iquiji yt.failerbot.3000@gmail.com")]
+#[derive(Debug, StructOpt, Clone)]
+#[structopt(
+    name = "webscraper-rs",
+    version = "0.3.1",
+    author = "Iquiji yt.failerbot.3000@gmail.com"
+)]
 struct Opt {
     /// Number of Threads
     #[structopt(short, long, default_value = "1")]
@@ -31,17 +35,17 @@ struct Opt {
 }
 
 #[tokio::main]
-async fn main() -> Result<(),Box<dyn Error>>{
+async fn main() -> Result<(), Box<dyn Error>> {
     let opt = Opt::from_args();
     //println!("{:?}", opt);
     let scraped_count: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let scraped_last_duration = Arc::new(AtomicU64::new(0));
-    let mut scraped_avg: (u64,u64) = (0,0);
+    let mut scraped_avg: (u64, u64) = (0, 0);
     let error_count = Arc::new(AtomicU64::new(0));
 
     let (db_client, connection) =
         tokio_postgres::connect("host=free-db.coy5e9jykzwm.eu-central-1.rds.amazonaws.com user=postgres port=5432 password=Rd7rko$g85GV^&%123", NoTls).await?;
-    let db_client= Arc::new(db_client);
+    let db_client = Arc::new(db_client);
 
     // The connection object performs the actual communication with the database,
     // so spawn it off to run on its own.
@@ -56,7 +60,7 @@ async fn main() -> Result<(),Box<dyn Error>>{
         compute_rank(true).await?;
         return Ok(());
     }
-    
+
     let db_client_unfold = db_client.clone();
     let unfload_opts = opt.clone();
     let url_worker_fut = futures::stream::unfold( (),|()| async {
@@ -95,9 +99,12 @@ async fn main() -> Result<(),Box<dyn Error>>{
     //weight updater task:
     //let db_weight_updater = db_client.clone();
     let db_weighter_opts = opt.clone();
-    let weight_updater = tokio::spawn(async move{
+    let weight_updater = tokio::spawn(async move {
         loop {
-            delay_for(std::time::Duration::from_secs(db_weighter_opts.compute_delay)).await;
+            delay_for(std::time::Duration::from_secs(
+                db_weighter_opts.compute_delay,
+            ))
+            .await;
             compute_rank(true).await.unwrap();
         }
     });
@@ -110,24 +117,29 @@ async fn main() -> Result<(),Box<dyn Error>>{
     let printer = tokio::spawn(async move {
         loop {
             delay_for(std::time::Duration::from_millis(printer_opts.duration)).await;
-            let last_duration: u64 = printer_scraped_last_duration.swap(0, std::sync::atomic::Ordering::SeqCst);
+            let last_duration: u64 =
+                printer_scraped_last_duration.swap(0, std::sync::atomic::Ordering::SeqCst);
             scraped_avg.0 += last_duration * (60000 / printer_opts.duration);
             scraped_avg.1 += 1;
             println!(
                 "Scraped total: {}, Scraped per Minute: {:.1},Avg SpM: {}, Scraped last duration: {}, Error count: {}",
                 printer_scraped_count.load(std::sync::atomic::Ordering::SeqCst),
                 last_duration * (60000 / printer_opts.duration),
-                last_duration,
                 scraped_avg.0 / scraped_avg.1,
+                last_duration,
                 printer_error_count.load(std::sync::atomic::Ordering::Relaxed)
             );
         }
     });
-    join!(url_worker_fut,weight_updater,printer);
+    join!(url_worker_fut, weight_updater, printer);
     Ok(())
 }
 
-async fn scrape_url(url: url::Url,db_client: &tokio_postgres::Client,verbose: bool) -> Result<(),Box<dyn Error>>{
+async fn scrape_url(
+    url: url::Url,
+    db_client: &tokio_postgres::Client,
+    verbose: bool,
+) -> Result<(), Box<dyn Error>> {
     let host_str = url.host_str().ok_or(core::fmt::Error)?;
     let hostname = Url::parse(&(url.scheme().to_owned() + "://" + host_str + "/"))?;
     // let mut db_client = pool.get().unwrap(); // Why does this fail sometimes ?!
@@ -135,14 +147,15 @@ async fn scrape_url(url: url::Url,db_client: &tokio_postgres::Client,verbose: bo
     //println!("Scraping: {}",&url);
 
     let resp = reqwest::get(url.as_str()).await?;
-    let body: Vec<u8> = resp.bytes_stream().try_fold(Vec::new(), |mut body, chunk| {
-        if body.len() < 1024*1024*1024 {
-            body.extend(&chunk);
-        }
-        async {
-            Ok(body)
-        }
-    }).await?;
+    let body: Vec<u8> = resp
+        .bytes_stream()
+        .try_fold(Vec::new(), |mut body, chunk| {
+            if body.len() < 1024 * 1024 * 1024 {
+                body.extend(&chunk);
+            }
+            async { Ok(body) }
+        })
+        .await?;
 
     let document = Document::from_read(&*body)?;
 
@@ -157,18 +170,22 @@ async fn scrape_url(url: url::Url,db_client: &tokio_postgres::Client,verbose: bo
             };
             match res_url {
                 Ok(_) => {}
-                Err(_) => {return None;}
+                Err(_) => {
+                    return None;
+                }
             }
             let res_url = res_url.unwrap();
             let res_url_query = res_url.query();
             if res_url_query.is_some() {
-                Some(Url::parse(
-                    &res_url
-                        .as_str()
-                        .to_owned()
-                        .replace(res_url.query().unwrap(), ""),
+                Some(
+                    Url::parse(
+                        &res_url
+                            .as_str()
+                            .to_owned()
+                            .replace(res_url.query().unwrap(), ""),
+                    )
+                    .unwrap(),
                 )
-                .unwrap())
             } else {
                 Some(res_url)
             }
@@ -253,7 +270,7 @@ async fn scrape_url(url: url::Url,db_client: &tokio_postgres::Client,verbose: bo
     Ok(())
 }
 
-async fn compute_rank(on_db: bool) -> Result<(),Box<dyn Error>>{
+async fn compute_rank(on_db: bool) -> Result<(), Box<dyn Error>> {
     println!("Computing new Weights/Ranks...");
     if on_db {
         let (db_client, connection) =
@@ -330,7 +347,7 @@ async fn compute_rank(on_db: bool) -> Result<(),Box<dyn Error>>{
     //         weight_per_link = 0.05
     //     }
     //     // set weight of all links where base url == our website to weight per link
-    //     db_client.query("UPDATE base_url_links SET weight = $2 WHERE base_url = $1",&[&base_url,&weight_per_link]).unwrap(); 
+    //     db_client.query("UPDATE base_url_links SET weight = $2 WHERE base_url = $1",&[&base_url,&weight_per_link]).unwrap();
     //     // set rank/weight of our website
     //     db_client.execute("UPDATE websites_v2 SET rank = $2 WHERE url = $1",&[&url,&total_weight]).unwrap();
     //     //println!("Setting url: {} to weight: {}, total of {} links get weight: {}",&url,total_weight,linkage_count,weight_per_link);
