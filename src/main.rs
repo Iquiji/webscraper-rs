@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let db_client_unfold = db_client.clone();
-    let unfload_opts = opt.clone();
+    let unfold_opts = opt.clone();
     let url_worker_fut = futures::stream::unfold( (),|()| async {
         let mut urls: Vec<url::Url> = vec![];
         let db_res = db_client_unfold.query("UPDATE crawl_queue_v2 SET status = 'processing' WHERE url = ANY (SELECT url FROM crawl_queue_v2 WHERE status = 'queued' ORDER BY timestamp ASC NULLS FIRST,error_count ASC LIMIT 50) RETURNING * ;",&[]).await;
@@ -77,19 +77,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!("{}", err);
             }
         }
-        if unfload_opts.verbose{
+        if unfold_opts.verbose{
             println!("getting {} new urls",urls.len());
         }
         Some((iter(urls),()))
     }).flatten().map(|url| async {
         let url = url;
-        match scrape_url(url.clone(),&db_client,unfload_opts.verbose).await {
+        match scrape_url(url.clone(),&db_client,unfold_opts.verbose).await {
             Ok(_) => {
                 scraped_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 scraped_last_duration.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             Err(err) => {
-                if unfload_opts.verbose {
+                if unfold_opts.verbose {
                     eprintln!("failed to scrape with error: {}",err);
                 }
                 // ignore db errors in error handling...
@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 error_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         };
-    }).buffer_unordered(opt.n_workers).for_each(|()| async {});
+    }).buffer_unordered(100).for_each_concurrent(unfold_opts.n_workers,|_| async {});
 
     //weight updater task:
     //let db_weight_updater = db_client.clone();
@@ -125,7 +125,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             scraped_avg.0 += last_duration * (60000 / printer_opts.duration);
             scraped_avg.1 += 1;
             println!(
-                "Scraped total: {}, Scraped per Minute: {:.1},Avg SpM: {}, Scraped last duration: {}, Error count: {}",
+                "Scraped total: {}, Scraped per Minute: {:.1}, Avg SpM: {}, Scraped last duration: {}, Error count: {}",
                 printer_scraped_count.load(std::sync::atomic::Ordering::SeqCst),
                 last_duration * (60000 / printer_opts.duration),
                 scraped_avg.0 / scraped_avg.1,
