@@ -9,11 +9,14 @@ use structopt::StructOpt;
 use futures::{TryStreamExt, StreamExt, stream::iter,join};
 
 #[derive(Debug, StructOpt,Clone)]
-#[structopt(name = "webscraper-rs",version = "0.3",author = "Iquiji yt.failerbot.3000@gmail.com")]
+#[structopt(name = "webscraper-rs",version = "0.3.1",author = "Iquiji yt.failerbot.3000@gmail.com")]
 struct Opt {
     /// Number of Threads
     #[structopt(short, long, default_value = "1")]
     n_workers: usize,
+    /// How often to compute new Ranks/Weights in seconds
+    #[structopt(short, long, default_value = "600")]
+    compute_delay: u64,
     /// Start Url
     #[structopt(short, long)]
     url: Option<String>,
@@ -21,10 +24,11 @@ struct Opt {
     #[structopt(short)]
     compute_only: bool,
     #[structopt(short, long)]
-    verbose: bool
+    verbose: bool,
+    /// Duration between each print in ms
+    #[structopt(short, long, default_value = "5000")]
+    duration: u64,
 }
-
-static DURATION: u64 = 5000;
 
 #[tokio::main]
 async fn main() -> Result<(),Box<dyn Error>>{
@@ -53,6 +57,7 @@ async fn main() -> Result<(),Box<dyn Error>>{
     }
     
     let db_client_unfold = db_client.clone();
+    let unfload_opts = opt.clone();
     let url_worker_fut = futures::stream::unfold( (),|()| async {
         let mut urls: Vec<url::Url> = vec![];
         let db_res = db_client_unfold.query("UPDATE crawl_queue_v2 SET status = 'processing' WHERE url = ANY (SELECT url FROM crawl_queue_v2 WHERE status = 'queued' ORDER BY timestamp ASC NULLS FIRST,error_count ASC LIMIT 50) RETURNING * ;",&[]).await;
@@ -70,13 +75,13 @@ async fn main() -> Result<(),Box<dyn Error>>{
         Some((iter(urls),()))
     }).flatten().map(|url| async {
         let url = url;
-        match scrape_url(url.clone(),&db_client).await {
+        match scrape_url(url.clone(),&db_client,unfload_opts.verbose).await {
             Ok(_) => {
                 scraped_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 scraped_last_duration.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             Err(err) => {
-                if opt.verbose {
+                if unfload_opts.verbose {
                     eprintln!("failed to scrape with error: {}",err);
                 }
                 // ignore db errors in error handling...
@@ -88,9 +93,10 @@ async fn main() -> Result<(),Box<dyn Error>>{
 
     //weight updater task:
     let db_weight_updater = db_client.clone();
+    let db_weighter_opts = opt.clone();
     let weight_updater = tokio::spawn(async move{
         loop {
-            delay_for(std::time::Duration::from_secs(120)).await;
+            delay_for(std::time::Duration::from_secs(db_weighter_opts.compute_delay)).await;
             compute_rank(&db_weight_updater, true).await;
         }
     });
@@ -99,14 +105,15 @@ async fn main() -> Result<(),Box<dyn Error>>{
     let printer_scraped_last_duration = scraped_last_duration.clone();
     let printer_scraped_count = scraped_count.clone();
     let printer_error_count = error_count.clone();
+    let printer_opts = opt.clone();
     let printer = tokio::spawn(async move {
         loop {
-            delay_for(std::time::Duration::from_millis(DURATION)).await;
+            delay_for(std::time::Duration::from_millis(printer_opts.duration)).await;
             let last_duration: u64 = printer_scraped_last_duration.swap(0, std::sync::atomic::Ordering::SeqCst);
             println!(
                 "Scraped total: {}, Scraped per Minute: {}, Scraped last duration: {}, Error count: {}",
                 printer_scraped_count.load(std::sync::atomic::Ordering::SeqCst),
-                last_duration * (60000 / DURATION),
+                last_duration * (60000 / printer_opts.duration),
                 last_duration,
                 printer_error_count.load(std::sync::atomic::Ordering::Relaxed)
             );
@@ -116,7 +123,7 @@ async fn main() -> Result<(),Box<dyn Error>>{
     Ok(())
 }
 
-async fn scrape_url(url: url::Url,db_client: &tokio_postgres::Client) -> Result<(),Box<dyn Error>>{
+async fn scrape_url(url: url::Url,db_client: &tokio_postgres::Client,verbose: bool) -> Result<(),Box<dyn Error>>{
     let host_str = url.host_str().ok_or(core::fmt::Error)?;
     let hostname = Url::parse(&(url.scheme().to_owned() + "://" + host_str + "/"))?;
     // let mut db_client = pool.get().unwrap(); // Why does this fail sometimes ?!
@@ -217,7 +224,9 @@ async fn scrape_url(url: url::Url,db_client: &tokio_postgres::Client) -> Result<
         if target_url.host_str().unwrap() == url.host_str().unwrap() {
             continue;
         } else if target_url.host_str().unwrap() == "example.com" {
-            eprintln!("Failed to parse host url because it contains 'example.com'");
+            if verbose {
+                eprintln!("Failed to parse host url because it contains 'example.com'");
+            }
             continue;
         }
         //println!("{}",target_url);
