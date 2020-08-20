@@ -36,6 +36,7 @@ async fn main() -> Result<(),Box<dyn Error>>{
     //println!("{:?}", opt);
     let scraped_count: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
     let scraped_last_duration = Arc::new(AtomicU64::new(0));
+    let mut scraped_avg: (u64,u64) = (0,0);
     let error_count = Arc::new(AtomicU64::new(0));
 
     let (db_client, connection) =
@@ -52,7 +53,7 @@ async fn main() -> Result<(),Box<dyn Error>>{
 
     if opt.compute_only {
         println!("only computing Weights");
-        compute_rank(&db_client, true).await;
+        compute_rank(true).await?;
         return Ok(());
     }
     
@@ -92,12 +93,12 @@ async fn main() -> Result<(),Box<dyn Error>>{
     }).buffer_unordered(opt.n_workers).for_each(|()| async {});
 
     //weight updater task:
-    let db_weight_updater = db_client.clone();
+    //let db_weight_updater = db_client.clone();
     let db_weighter_opts = opt.clone();
     let weight_updater = tokio::spawn(async move{
         loop {
             delay_for(std::time::Duration::from_secs(db_weighter_opts.compute_delay)).await;
-            compute_rank(&db_weight_updater, true).await;
+            compute_rank(true).await.unwrap();
         }
     });
 
@@ -110,11 +111,14 @@ async fn main() -> Result<(),Box<dyn Error>>{
         loop {
             delay_for(std::time::Duration::from_millis(printer_opts.duration)).await;
             let last_duration: u64 = printer_scraped_last_duration.swap(0, std::sync::atomic::Ordering::SeqCst);
+            scraped_avg.0 += last_duration * (60000 / printer_opts.duration);
+            scraped_avg.1 += 1;
             println!(
-                "Scraped total: {}, Scraped per Minute: {}, Scraped last duration: {}, Error count: {}",
+                "Scraped total: {}, Scraped per Minute: {:.1},Avg SpM: {}, Scraped last duration: {}, Error count: {}",
                 printer_scraped_count.load(std::sync::atomic::Ordering::SeqCst),
                 last_duration * (60000 / printer_opts.duration),
                 last_duration,
+                scraped_avg.0 / scraped_avg.1,
                 printer_error_count.load(std::sync::atomic::Ordering::Relaxed)
             );
         }
@@ -249,12 +253,20 @@ async fn scrape_url(url: url::Url,db_client: &tokio_postgres::Client,verbose: bo
     Ok(())
 }
 
-async fn compute_rank(db_client: &tokio_postgres::Client,on_db: bool) {
+async fn compute_rank(on_db: bool) -> Result<(),Box<dyn Error>>{
     println!("Computing new Weights/Ranks...");
     if on_db {
+        let (db_client, connection) =
+        tokio_postgres::connect("host=free-db.coy5e9jykzwm.eu-central-1.rds.amazonaws.com user=postgres port=5432 password=Rd7rko$g85GV^&%123", NoTls).await?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
         db_client.execute(r#"WITH target_info AS(SELECT target_url,count(1)AS count,SUM(weight)AS total_weight FROM base_url_links GROUP BY target_url),updated_links AS(UPDATE base_url_links SET weight=(target_info.total_weight/count)*0.85 FROM target_info WHERE base_url=target_info.target_url)UPDATE websites_v2 SET"rank"=target_info.total_weight FROM target_info WHERE hostname = target_info.target_url;"#,&[]).await.unwrap();
-        return;
+        return Ok(());
     }
+    Ok(())
     // let now = std::time::Instant::now();
     // let mut total_updated = 0;
 
