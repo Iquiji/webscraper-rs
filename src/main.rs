@@ -9,7 +9,7 @@ use structopt::StructOpt;
 use futures::{TryStreamExt, StreamExt, stream::iter,join};
 
 #[derive(Debug, StructOpt,Clone)]
-#[structopt(name = "webscraper-rs",version = "0.2",author = "Iquiji yt.failerbot.3000@gmail.com")]
+#[structopt(name = "webscraper-rs",version = "0.3",author = "Iquiji yt.failerbot.3000@gmail.com")]
 struct Opt {
     /// Number of Threads
     #[structopt(short, long, default_value = "1")]
@@ -138,23 +138,28 @@ async fn scrape_url(url: url::Url,db_client: &tokio_postgres::Client) -> Result<
     let new_urls: BTreeSet<_> = document
         .find(Name("a"))
         .filter_map(|n| n.attr("href"))
-        .map(|x| {
+        .filter_map(|x| {
             let res_url = if x.starts_with("http") {
-                Url::parse(x).unwrap()
+                Url::parse(x)
             } else {
-                url.join(x).unwrap()
+                url.join(x)
             };
+            match res_url {
+                Ok(_) => {}
+                Err(_) => {return None;}
+            }
+            let res_url = res_url.unwrap();
             let res_url_query = res_url.query();
             if res_url_query.is_some() {
-                Url::parse(
+                Some(Url::parse(
                     &res_url
                         .as_str()
                         .to_owned()
                         .replace(res_url.query().unwrap(), ""),
                 )
-                .unwrap()
+                .unwrap())
             } else {
-                res_url
+                Some(res_url)
             }
         })
         .collect();
