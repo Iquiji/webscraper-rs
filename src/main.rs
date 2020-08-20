@@ -77,6 +77,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!("{}", err);
             }
         }
+        if unfload_opts.verbose{
+            println!("getting {} new urls",urls.len());
+        }
         Some((iter(urls),()))
     }).flatten().map(|url| async {
         let url = url;
