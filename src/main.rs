@@ -221,7 +221,7 @@ async fn scrape_url(
         text_string.push_str(&string);
     }
     
-    // MEM leak after here:
+    // MEM 'leak' after here:
 
     // ADD to websites_v2
     db_client.query("WITH before AS (SELECT * FROM websites_v2 WHERE url = $1 ), inserted AS (INSERT INTO websites_v2 (url,text,last_scraped,text_tsvector,hostname) VALUES ($1,$2,NOW(),to_tsvector('english',$2),$3) ON CONFLICT (url) DO UPDATE SET last_scraped = NOW(), text = $2 , text_tsvector = to_tsvector('english',$2) WHERE websites_v2.url = $1) SELECT last_scraped FROM before;",&[&url.as_str(),&text_string.get(..(text_string.chars().map(|_| 1).sum::<usize>()).max(10000)).to_owned(),&hostname.as_str()]).await?;
@@ -242,10 +242,17 @@ async fn scrape_url(
         .collect();
 
     // insert into crawl_queue_v2 with timestamp NULL
+    if verbose {
+        println!("into crawl_queue_v2, num: {}",new_urls.len());   
+    }
+    let prepared_insert = db_client.prepare("INSERT INTO crawl_queue_v2 (url,timestamp,status) VALUES ($1,NULL,$2) ON CONFLICT (url) DO NOTHING").await?;
     for new_url in new_urls {
-        db_client.query("INSERT INTO crawl_queue_v2 (url,timestamp,status) VALUES ($1,NULL,$2) ON CONFLICT (url) DO NOTHING",&[&new_url.as_str(),&"queued"]).await?;
+        db_client.execute(&prepared_insert,&[&new_url.as_str(),&"queued"]).await?;
     }
 
+    if verbose {
+        println!("into base_url_links, num: {}",target_base_urls.len());
+    }
     // insert into base_url_links
     for target_url in target_base_urls {
         if target_url.host_str().unwrap() == url.host_str().unwrap() {
@@ -256,16 +263,20 @@ async fn scrape_url(
             }
             continue;
         }
-        //println!("{}",target_url);
+        if verbose {
+            println!("{}",target_url);
+        }
         let db_res = db_client.query("WITH inserted AS ( INSERT INTO base_url_links (base_url,target_url) VALUES ($1,$2) ON CONFLICT (base_url,target_url) DO NOTHING RETURNING target_url) UPDATE websites_v2 SET popularity = websites_v2.popularity + 1 FROM inserted WHERE hostname = inserted.target_url;",
-            &[&Url::parse(&(url.scheme().to_owned() + "://" + url.host_str().unwrap() + "/")).unwrap().as_str(),&target_url.as_str()]).await;
+           &[&Url::parse(&(url.scheme().to_owned() + "://" + url.host_str().unwrap() + "/")).unwrap().as_str(),&target_url.as_str()]).await;
         match db_res {
             Ok(_) => {
                 //println!("{:?}",db_ok);
             }
             Err(err) => {
-                eprintln!("{}", err);
-                continue;
+                if verbose {
+                    eprintln!("{}", err);
+                }
+                    continue;
             }
         }
     }
