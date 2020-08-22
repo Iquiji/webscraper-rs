@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 error_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         };
-    }).buffer_unordered(100).for_each_concurrent(unfold_opts.n_workers,|_| async {});
+    }).buffer_unordered(unfold_opts.n_workers).for_each(|_| async {});
 
     //weight updater task:
     //let db_weight_updater = db_client.clone();
@@ -159,7 +159,7 @@ async fn scrape_url(
             async { Ok(body) }
         })
         .await?;
-
+    
     let document = Document::from_read(&*body)?;
 
     let new_urls: BTreeSet<_> = document
@@ -220,6 +220,9 @@ async fn scrape_url(
         text_string.push_str(" ");
         text_string.push_str(&string);
     }
+    
+    // MEM leak after here:
+
     // ADD to websites_v2
     db_client.query("WITH before AS (SELECT * FROM websites_v2 WHERE url = $1 ), inserted AS (INSERT INTO websites_v2 (url,text,last_scraped,text_tsvector,hostname) VALUES ($1,$2,NOW(),to_tsvector('english',$2),$3) ON CONFLICT (url) DO UPDATE SET last_scraped = NOW(), text = $2 , text_tsvector = to_tsvector('english',$2) WHERE websites_v2.url = $1) SELECT last_scraped FROM before;",&[&url.as_str(),&text_string.get(..(text_string.chars().map(|_| 1).sum::<usize>()).max(10000)).to_owned(),&hostname.as_str()]).await?;
 
@@ -261,7 +264,7 @@ async fn scrape_url(
                 //println!("{:?}",db_ok);
             }
             Err(err) => {
-                println!("{}", err);
+                eprintln!("{}", err);
                 continue;
             }
         }
