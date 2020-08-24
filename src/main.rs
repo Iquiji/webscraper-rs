@@ -253,6 +253,7 @@ async fn scrape_url(
     if verbose {
         println!("into base_url_links, num: {}",target_base_urls.len());
     }
+    let prepared_insert_into_base_urls = db_client.prepare("WITH inserted AS ( INSERT INTO base_url_links (base_url,target_url) VALUES ($1,$2) ON CONFLICT (base_url,target_url) DO NOTHING RETURNING target_url) UPDATE websites_v2 SET popularity = websites_v2.popularity + 1 FROM inserted WHERE hostname = inserted.target_url;").await?;
     // insert into base_url_links
     for target_url in target_base_urls {
         if target_url.host_str().unwrap() == url.host_str().unwrap() {
@@ -266,7 +267,7 @@ async fn scrape_url(
         if verbose {
             println!("{}",target_url);
         }
-        let db_res = db_client.query("WITH inserted AS ( INSERT INTO base_url_links (base_url,target_url) VALUES ($1,$2) ON CONFLICT (base_url,target_url) DO NOTHING RETURNING target_url) UPDATE websites_v2 SET popularity = websites_v2.popularity + 1 FROM inserted WHERE hostname = inserted.target_url;",
+        let db_res = db_client.query(&prepared_insert_into_base_urls,
            &[&Url::parse(&(url.scheme().to_owned() + "://" + url.host_str().unwrap() + "/")).unwrap().as_str(),&target_url.as_str()]).await;
         match db_res {
             Ok(_) => {
