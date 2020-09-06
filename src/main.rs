@@ -149,17 +149,22 @@ async fn scrape_url(
 
     //println!("Scraping: {}",&url);
 
+    // let resp = reqwest::blocking::get(url.as_str())?;
+    // let body = std::io::Read::take(resp,1024 * 1024 * 1024);
     let resp = reqwest::get(url.as_str()).await?;
+    if verbose {
+        println!("content_length header: {:?}",&resp.content_length());
+    }
     let body: Vec<u8> = resp
         .bytes_stream()
         .try_fold(Vec::new(), |mut body, chunk| {
-            if body.len() < 1024 * 1024 * 1024 {
+            if body.len() < 1024 * 1024 /* 1024 */{
                 body.extend(&chunk);
             }
             async { Ok(body) }
         })
         .await?;
-    
+
     let document = Document::from_read(&*body)?;
 
     let new_urls: BTreeSet<_> = document
