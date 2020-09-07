@@ -149,11 +149,17 @@ async fn scrape_url(
 
     //println!("Scraping: {}",&url);
 
+    // build Client:
+    let web_client = reqwest::ClientBuilder::new().user_agent("Pwnsearch-Scraper/0.4").timeout(std::time::Duration::from_secs(60)).build()?;
+
     // let resp = reqwest::blocking::get(url.as_str())?;
     // let body = std::io::Read::take(resp,1024 * 1024 * 1024);
-    let resp = reqwest::get(url.as_str()).await?;
+    let now = std::time::Instant::now();
+    let resp = web_client.get(url.as_str()).send().await.unwrap();
+    //let resp = reqwest::get(url.as_str()).await?;
     if verbose {
         println!("content_length header: {:?}",&resp.content_length());
+        println!("duration of reqwest = {}",now.elapsed().as_secs());
     }
     let body: Vec<u8> = resp
         .bytes_stream()
