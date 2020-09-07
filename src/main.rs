@@ -155,7 +155,7 @@ async fn scrape_url(
     // let resp = reqwest::blocking::get(url.as_str())?;
     // let body = std::io::Read::take(resp,1024 * 1024 * 1024);
     let now = std::time::Instant::now();
-    let resp = web_client.get(url.as_str()).send().await.unwrap();
+    let resp = web_client.get(url.as_str()).send().await?;
     //let resp = reqwest::get(url.as_str()).await?;
     if verbose {
         println!("content_length header: {:?}",&resp.content_length());
