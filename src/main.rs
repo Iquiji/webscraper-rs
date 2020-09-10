@@ -231,7 +231,8 @@ async fn scrape_url(
         text_string.push_str(" ");
         text_string.push_str(&string);
     }
-    
+    let re = regex::Regex::new(r"/\s\s+/g").unwrap();
+    text_string = (*re.replace_all(&text_string, " ")).to_owned();
     // MEM 'leak' after here:
 
     // ADD to websites_v2
