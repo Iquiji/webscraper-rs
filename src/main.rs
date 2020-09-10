@@ -20,7 +20,7 @@ struct Opt {
     n_workers: usize,
     /// How often to compute new Ranks/Weights in seconds
     #[structopt(short, long, default_value = "600")]
-    compute_delay: u64,
+    rank_computing_delay: u64,
     /// Start Url
     #[structopt(short, long)]
     url: Option<String>,
@@ -105,7 +105,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let weight_updater = tokio::spawn(async move {
         loop {
             delay_for(std::time::Duration::from_secs(
-                db_weighter_opts.compute_delay,
+                db_weighter_opts.rank_computing_delay,
             ))
             .await;
             compute_rank(true).await.unwrap();
@@ -231,8 +231,8 @@ async fn scrape_url(
         text_string.push_str(" ");
         text_string.push_str(&string);
     }
-    let re = regex::Regex::new(r"/\s\s+/g").unwrap();
-    text_string = (*re.replace_all(&text_string, " ")).to_owned();
+    // let re = regex::Regex::new(r"/\s\s+/g").unwrap();
+    // text_string = (*re.replace_all(&text_string, " ")).to_owned();
     // MEM 'leak' after here:
 
     // ADD to websites_v2
