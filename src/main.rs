@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let error_count = Arc::new(AtomicU64::new(0));
 
     let (db_client, connection) =
-        tokio_postgres::connect("host=free-db.coy5e9jykzwm.eu-central-1.rds.amazonaws.com user=postgres port=5432 password=Rd7rko$g85GV^&%123", NoTls).await?;
+        tokio_postgres::connect("host=db.failhack.com user=postgres port=5432 password=Rd7rko$g85GV^&%123", NoTls).await?;
     let db_client = Arc::new(db_client);
 
     // The connection object performs the actual communication with the database,
