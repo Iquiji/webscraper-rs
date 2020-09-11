@@ -33,6 +33,9 @@ struct Opt {
     /// Duration between each print in ms
     #[structopt(short, long, default_value = "5000")]
     duration: u64,
+    /// if images should be scraped
+    #[structopt(short, long)]
+    images: bool,
 }
 
 #[derive(Clone)]
@@ -43,6 +46,7 @@ struct PreparedStatements{
     into_base_urls : Statement,
     update_crawl_queue_finished: Statement,
     error_in_scrape_url_handler: Statement,
+    insert_into_images : Statement,
 }
 impl PreparedStatements{
     async fn new(db_client :&tokio_postgres::Client) -> Result<Self, Box<dyn Error>>{
@@ -53,6 +57,7 @@ impl PreparedStatements{
             into_base_urls : db_client.prepare("WITH inserted AS ( INSERT INTO base_url_links (base_url,target_url) VALUES ($1,$2) ON CONFLICT (base_url,target_url) DO NOTHING RETURNING target_url) UPDATE websites_v2 SET popularity = websites_v2.popularity + 1 FROM inserted WHERE hostname = inserted.target_url;").await?,
             update_crawl_queue_finished : db_client.prepare("UPDATE crawl_queue_v2 SET status = 'queued' , timestamp = current_timestamp WHERE url = $1;").await?,
             error_in_scrape_url_handler : db_client.prepare("UPDATE crawl_queue_v2 SET status = 'queued' , error_count = crawl_queue_v2.error_count + 1 WHERE url = $1").await?,
+            insert_into_images : db_client.prepare("INSERT INTO images (url,text,text_tsvector) VALUES ($1,$2,to_tsvector('english',$2)) ON CONFLICT DO NOTHING;").await?,
         })
     }
 }
@@ -108,7 +113,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some((iter(urls),()))
     }).flatten().map(|url| async {
         let url = url;
-        match scrape_url(url.clone(),&db_client,unfold_opts.verbose,&prepared_statements).await {
+        match scrape_url(url.clone(),&db_client,unfold_opts.verbose,&prepared_statements,unfold_opts.images).await {
             Ok(_) => {
                 scraped_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 scraped_last_duration.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -168,6 +173,7 @@ async fn scrape_url(
     db_client: &tokio_postgres::Client,
     verbose: bool,
     prepared_statements: &PreparedStatements,
+    images: bool,
 ) -> Result<(), Box<dyn Error>> {
     let host_str = url.host_str().ok_or(core::fmt::Error)?;
     let hostname = Url::parse(&(url.scheme().to_owned() + "://" + host_str + "/"))?;
@@ -260,6 +266,42 @@ async fn scrape_url(
     }
     if verbose{
         println!("text string for '{}' has len: {}, min with 10k: {}",&url,text_string.len(),text_string.chars().map(|_| 1).sum::<usize>().min(10000));
+    }
+    // url,alt-text
+    if images{
+        if verbose {
+            println!("images!");
+        }
+        let all_images: Vec<(String,String)> = document.find(Name("img")).filter_map(|img| { 
+            let img_url_res = img.attr("src");
+            match img_url_res{
+                Some(img_url) => {
+                    let img_text = img.attr("alt");
+                    let img_url_final = if img_url.starts_with("http") {
+                        Url::parse(img_url)
+                    } else {
+                        url.join(img_url)
+                    };
+
+                    match img_url_final {
+                        Ok(img_url) => {
+                            //println!("image url: '{}' , text: '{}'",img_url.as_str().to_owned(),img_text.unwrap_or("").to_owned());
+                            Some((img_url.as_str().to_owned(),img_text.unwrap_or("").to_owned()))
+                        }
+                        Err(_) => {
+                            None
+                        }
+                    }
+                }
+                _ => {None}
+            }
+        }).collect();
+        for image in all_images {
+            if verbose {
+                println!("image (link,text) pair{:?}",image);
+            }
+            db_client.execute(&prepared_statements.insert_into_images, &[&image.0,&image.1]).await?;
+        }
     }
     // let re = regex::Regex::new(r"/\s\s+/g").unwrap();
     // text_string = (*re.replace_all(&text_string, " ")).to_owned();
