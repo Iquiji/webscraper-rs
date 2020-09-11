@@ -170,8 +170,9 @@ async fn scrape_url(
     let host_str = url.host_str().ok_or(core::fmt::Error)?;
     let hostname = Url::parse(&(url.scheme().to_owned() + "://" + host_str + "/"))?;
     // let mut db_client = pool.get().unwrap(); // Why does this fail sometimes ?!
-
-    //println!("Scraping: {}",&url);
+    if verbose{
+        println!("Scraping: {}",&url);
+    }
 
     // build Client:
     let web_client = reqwest::ClientBuilder::new().user_agent("Pwnsearch-Scraper/0.4").timeout(std::time::Duration::from_secs(60)).build()?;
@@ -182,8 +183,8 @@ async fn scrape_url(
     let resp = web_client.get(url.as_str()).send().await?;
     //let resp = reqwest::get(url.as_str()).await?;
     if verbose {
-        println!("content_length header: {:?}",&resp.content_length());
-        println!("duration of reqwest = {}",now.elapsed().as_secs());
+        //println!("content_length header: {:?}",&resp.content_length());
+        println!("duration it took reqwest = {}ms",now.elapsed().as_millis());
     }
     let body: Vec<u8> = resp
         .bytes_stream()
