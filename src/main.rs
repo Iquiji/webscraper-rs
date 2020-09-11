@@ -7,6 +7,7 @@ use std::{collections::BTreeSet, error::Error};
 use structopt::StructOpt;
 use tokio::time::delay_for;
 use url::Url;
+use tokio_postgres::Statement;
 
 #[derive(Debug, StructOpt, Clone)]
 #[structopt(
@@ -32,6 +33,24 @@ struct Opt {
     /// Duration between each print in ms
     #[structopt(short, long, default_value = "5000")]
     duration: u64,
+}
+
+#[derive(Clone)]
+struct PreparedStatements{
+    add_to_websites_v2 : Statement,
+    into_crawl_queue : Statement,
+    into_base_urls : Statement,
+    update_crawl_queue_finished: Statement,
+}
+impl PreparedStatements{
+    async fn new(db_client :&tokio_postgres::Client) -> Result<Self, Box<dyn Error>>{
+        Ok(PreparedStatements {
+            add_to_websites_v2: db_client.prepare("WITH before AS (SELECT * FROM websites_v2 WHERE url = $1 ), inserted AS (INSERT INTO websites_v2 (url,text,last_scraped,text_tsvector,hostname) VALUES ($1,$2,NOW(),to_tsvector('english',$2),$3) ON CONFLICT (url) DO UPDATE SET last_scraped = NOW(), text = $2 , text_tsvector = to_tsvector('english',$2) WHERE websites_v2.url = $1) SELECT last_scraped FROM before;").await?,
+            into_crawl_queue: db_client.prepare("INSERT INTO crawl_queue_v2 (url,timestamp,status) VALUES ($1,NULL,$2) ON CONFLICT (url) DO NOTHING").await?,
+            into_base_urls : db_client.prepare("WITH inserted AS ( INSERT INTO base_url_links (base_url,target_url) VALUES ($1,$2) ON CONFLICT (base_url,target_url) DO NOTHING RETURNING target_url) UPDATE websites_v2 SET popularity = websites_v2.popularity + 1 FROM inserted WHERE hostname = inserted.target_url;").await?,
+            update_crawl_queue_finished : db_client.prepare("UPDATE crawl_queue_v2 SET status = 'queued' , timestamp = current_timestamp WHERE url = $1").await?,
+        })
+    }
 }
 
 #[tokio::main]
@@ -61,6 +80,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    let prepared_statements = PreparedStatements::new(&db_client).await?;
+
     let db_client_unfold = db_client.clone();
     let unfold_opts = opt.clone();
     let url_worker_fut = futures::stream::unfold( (),|()| async {
@@ -83,7 +104,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some((iter(urls),()))
     }).flatten().map(|url| async {
         let url = url;
-        match scrape_url(url.clone(),&db_client,unfold_opts.verbose).await {
+        match scrape_url(url.clone(),&db_client,unfold_opts.verbose,&prepared_statements).await {
             Ok(_) => {
                 scraped_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 scraped_last_duration.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -142,6 +163,7 @@ async fn scrape_url(
     url: url::Url,
     db_client: &tokio_postgres::Client,
     verbose: bool,
+    prepared_statements: &PreparedStatements,
 ) -> Result<(), Box<dyn Error>> {
     let host_str = url.host_str().ok_or(core::fmt::Error)?;
     let hostname = Url::parse(&(url.scheme().to_owned() + "://" + host_str + "/"))?;
@@ -236,7 +258,7 @@ async fn scrape_url(
     // MEM 'leak' after here:
 
     // ADD to websites_v2
-    db_client.query("WITH before AS (SELECT * FROM websites_v2 WHERE url = $1 ), inserted AS (INSERT INTO websites_v2 (url,text,last_scraped,text_tsvector,hostname) VALUES ($1,$2,NOW(),to_tsvector('english',$2),$3) ON CONFLICT (url) DO UPDATE SET last_scraped = NOW(), text = $2 , text_tsvector = to_tsvector('english',$2) WHERE websites_v2.url = $1) SELECT last_scraped FROM before;",&[&url.as_str(),&(text_string.get(..(text_string.chars().map(|_| 1).sum::<usize>()).max(10000)).ok_or("")?.to_owned() + " " + url.as_str()),&hostname.as_str()]).await?;
+    db_client.query(&prepared_statements.add_to_websites_v2,&[&url.as_str(),&(text_string.get(..(text_string.chars().map(|_| 1).sum::<usize>()).max(10000)).ok_or("")?.to_owned() + " " + url.as_str()),&hostname.as_str()]).await?;
 
     // make target base urls
     let target_base_urls: BTreeSet<Url> = new_urls
@@ -257,15 +279,13 @@ async fn scrape_url(
     if verbose {
         println!("into crawl_queue_v2, num: {}",new_urls.len());   
     }
-    let prepared_insert = db_client.prepare("INSERT INTO crawl_queue_v2 (url,timestamp,status) VALUES ($1,NULL,$2) ON CONFLICT (url) DO NOTHING").await?;
     for new_url in new_urls {
-        db_client.execute(&prepared_insert,&[&new_url.as_str(),&"queued"]).await?;
+        db_client.execute(&prepared_statements.into_crawl_queue,&[&new_url.as_str(),&"queued"]).await?;
     }
 
     if verbose {
         println!("into base_url_links, num: {}",target_base_urls.len());
     }
-    let prepared_insert_into_base_urls = db_client.prepare("WITH inserted AS ( INSERT INTO base_url_links (base_url,target_url) VALUES ($1,$2) ON CONFLICT (base_url,target_url) DO NOTHING RETURNING target_url) UPDATE websites_v2 SET popularity = websites_v2.popularity + 1 FROM inserted WHERE hostname = inserted.target_url;").await?;
     // insert into base_url_links
     for target_url in target_base_urls {
         if target_url.host_str().unwrap() == url.host_str().unwrap() {
@@ -279,7 +299,7 @@ async fn scrape_url(
         if verbose {
             println!("{}",target_url);
         }
-        let db_res = db_client.query(&prepared_insert_into_base_urls,
+        let db_res = db_client.query(&prepared_statements.into_base_urls,
            &[&Url::parse(&(url.scheme().to_owned() + "://" + url.host_str().unwrap() + "/")).unwrap().as_str(),&target_url.as_str()]).await;
         match db_res {
             Ok(_) => {
@@ -295,7 +315,7 @@ async fn scrape_url(
     }
 
     // Update crawl_queue_v2 to say finishged crawling back in queue with timestamp now
-    db_client.execute("UPDATE crawl_queue_v2 SET status = 'queued' , timestamp = current_timestamp WHERE url = $1",&[&url.as_str()]).await?;
+    db_client.execute(&prepared_statements.update_crawl_queue_finished,&[&url.as_str()]).await?;
 
     Ok(())
 }
