@@ -70,11 +70,25 @@ ALTER TABLE public.crawl_queue OWNER TO postgres;
 CREATE TABLE public.crawl_queue_v2 (
     url text NOT NULL,
     "timestamp" timestamp without time zone,
-    status text NOT NULL
+    status text NOT NULL,
+    error_count bigint DEFAULT 0 NOT NULL
 );
 
 
 ALTER TABLE public.crawl_queue_v2 OWNER TO postgres;
+
+--
+-- Name: images; Type: TABLE; Schema: public; Owner: postgres
+--
+
+CREATE TABLE public.images (
+    url text NOT NULL,
+    text text,
+    text_tsvector tsvector
+);
+
+
+ALTER TABLE public.images OWNER TO postgres;
 
 --
 -- Name: users; Type: TABLE; Schema: public; Owner: postgres
@@ -117,7 +131,8 @@ CREATE TABLE public.websites_v2 (
     popularity bigint DEFAULT 0,
     json json,
     rank double precision,
-    text_tsvector tsvector
+    text_tsvector tsvector,
+    hostname text
 );
 
 
@@ -137,6 +152,14 @@ ALTER TABLE ONLY public.base_url_links
 
 ALTER TABLE ONLY public.crawl_queue_v2
     ADD CONSTRAINT crawl_queue_v2_pkey PRIMARY KEY (url);
+
+
+--
+-- Name: images images_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+--
+
+ALTER TABLE ONLY public.images
+    ADD CONSTRAINT images_pkey PRIMARY KEY (url);
 
 
 --
@@ -167,6 +190,20 @@ CREATE INDEX crawl_queue_v2_queued ON public.crawl_queue_v2 USING btree ("timest
 --
 
 CREATE INDEX gin_index ON public.websites_v2 USING gin (text_tsvector);
+
+
+--
+-- Name: hostnames; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX hostnames ON public.websites_v2 USING btree (hostname);
+
+
+--
+-- Name: image_gin; Type: INDEX; Schema: public; Owner: postgres
+--
+
+CREATE INDEX image_gin ON public.images USING gin (text_tsvector);
 
 
 --
