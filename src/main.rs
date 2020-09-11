@@ -113,7 +113,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             Err(err) => {
                 if unfold_opts.verbose {
-                    eprintln!("failed to scrape with error: {}",err);
+                    eprintln!("failed to scrape '{}' with error: {}",url.clone(),err);
                 }
                 // ignore db errors in error handling...
                 let _ = db_client.execute("UPDATE crawl_queue_v2 SET status = 'queued' , error_count = crawl_queue_v2.error_count + 1 WHERE url = $1",&[&url.as_str()]).await;
@@ -255,6 +255,9 @@ async fn scrape_url(
     for string in text.clone() {
         text_string.push_str(" ");
         text_string.push_str(&string);
+    }
+    if verbose{
+        println!("text string for '{}' has len: {}",&url,text_string.len());
     }
     // let re = regex::Regex::new(r"/\s\s+/g").unwrap();
     // text_string = (*re.replace_all(&text_string, " ")).to_owned();
