@@ -257,14 +257,14 @@ async fn scrape_url(
         text_string.push_str(&string);
     }
     if verbose{
-        println!("text string for '{}' has len: {}, max with 10k: {}",&url,text_string.len(),text_string.chars().map(|_| 1).sum::<usize>().max(10000));
+        println!("text string for '{}' has len: {}, min with 10k: {}",&url,text_string.len(),text_string.chars().map(|_| 1).sum::<usize>().min(10000));
     }
     // let re = regex::Regex::new(r"/\s\s+/g").unwrap();
     // text_string = (*re.replace_all(&text_string, " ")).to_owned();
     // MEM 'leak' after here:
 
     // ADD to websites_v2
-    db_client.query(&prepared_statements.add_to_websites_v2,&[&url.as_str(),&(text_string.get(..(text_string.chars().map(|_| 1).sum::<usize>()).max(10000)).ok_or("")?.to_owned() + " " + url.as_str()),&hostname.as_str()]).await?;
+    db_client.query(&prepared_statements.add_to_websites_v2,&[&url.as_str(),&(text_string.get(..(text_string.chars().map(|_| 1).sum::<usize>()).min(10000)).ok_or("")?.to_owned() + " " + url.as_str()),&hostname.as_str()]).await?;
 
     // make target base urls
     let target_base_urls: BTreeSet<Url> = new_urls
