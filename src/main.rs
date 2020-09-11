@@ -257,7 +257,7 @@ async fn scrape_url(
         text_string.push_str(&string);
     }
     if verbose{
-        println!("text string for '{}' has len: {}",&url,text_string.len());
+        println!("text string for '{}' has len: {}, max with 10k: {}",&url,text_string.len(),text_string.chars().map(|_| 1).sum::<usize>().max(10000));
     }
     // let re = regex::Regex::new(r"/\s\s+/g").unwrap();
     // text_string = (*re.replace_all(&text_string, " ")).to_owned();
