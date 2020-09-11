@@ -42,6 +42,7 @@ struct PreparedStatements{
     into_crawl_queue : Statement,
     into_base_urls : Statement,
     update_crawl_queue_finished: Statement,
+    error_in_scrape_url_handler: Statement,
 }
 impl PreparedStatements{
     async fn new(db_client :&tokio_postgres::Client) -> Result<Self, Box<dyn Error>>{
@@ -51,6 +52,7 @@ impl PreparedStatements{
             into_crawl_queue: db_client.prepare("INSERT INTO crawl_queue_v2 (url,timestamp,status) VALUES ($1,NULL,$2) ON CONFLICT (url) DO NOTHING;").await?,
             into_base_urls : db_client.prepare("WITH inserted AS ( INSERT INTO base_url_links (base_url,target_url) VALUES ($1,$2) ON CONFLICT (base_url,target_url) DO NOTHING RETURNING target_url) UPDATE websites_v2 SET popularity = websites_v2.popularity + 1 FROM inserted WHERE hostname = inserted.target_url;").await?,
             update_crawl_queue_finished : db_client.prepare("UPDATE crawl_queue_v2 SET status = 'queued' , timestamp = current_timestamp WHERE url = $1;").await?,
+            error_in_scrape_url_handler : db_client.prepare("UPDATE crawl_queue_v2 SET status = 'queued' , error_count = crawl_queue_v2.error_count + 1 WHERE url = $1").await?,
         })
     }
 }
@@ -116,7 +118,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     eprintln!("failed to scrape '{}' with error: {}",url.clone(),err);
                 }
                 // ignore db errors in error handling...
-                let _ = db_client.execute("UPDATE crawl_queue_v2 SET status = 'queued' , error_count = crawl_queue_v2.error_count + 1 WHERE url = $1",&[&url.as_str()]).await;
+                let _ = db_client.execute(&prepared_statements.error_in_scrape_url_handler,&[&url.as_str()]).await;
                 error_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         };
