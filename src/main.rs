@@ -137,8 +137,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 scraped_last_duration.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             Err(err) => {
-                if unfold_opts.verbose {
-                    eprintln!("failed to scrape '{}' with error: {}", url.clone(), err);
+                if unfold_opts.print_main_errors {
+                    eprintln!("failed to scrape '{}' with error: '{}'", url.clone(), err);
                 }
                 // ignore db errors in error handling...
                 let _ = db_client
