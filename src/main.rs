@@ -339,12 +339,12 @@ async fn scrape_url(
             if verbose {
                 println!("image (link,text) pair{:?}", image);
             }
-            db_client
+            let _ = db_client
                 .execute(
                     &prepared_statements.insert_into_images,
                     &[&image.0, &image.1],
                 )
-                .await?;
+                .await;
         }
     }
     // let re = regex::Regex::new(r"/\s\s+/g").unwrap();
