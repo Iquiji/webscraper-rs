@@ -246,25 +246,34 @@ async fn scrape_url(
                 url.join(x)
             };
             match res_url {
-                Ok(_) => {}
+                Ok(res_url) => {
+                    let res_url_query = res_url.query();
+                    if res_url_query.is_some() {
+                        Some(
+                            Url::parse(
+                                &res_url
+                                    .as_str()
+                                    .to_owned()
+                                    .replace(res_url.query().unwrap(), ""),
+                            )
+                            .unwrap(),
+                        )
+                    } else {
+                        Some(res_url)
+                    }
+                }
                 Err(_) => {
                     return None;
                 }
             }
-            let res_url = res_url.unwrap();
-            let res_url_query = res_url.query();
-            if res_url_query.is_some() {
-                Some(
-                    Url::parse(
-                        &res_url
-                            .as_str()
-                            .to_owned()
-                            .replace(res_url.query().unwrap(), ""),
-                    )
-                    .unwrap(),
-                )
-            } else {
-                Some(res_url)
+        }).filter_map(|url|{
+            if url.scheme() == "http" || url.scheme() == "https"{
+                Some(url)
+            }else{
+                if verbose{
+                    println!("filtering out: '{}',because does not start with http!",url.as_str());
+                }
+                None
             }
         })
         .collect();
