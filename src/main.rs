@@ -6,8 +6,8 @@ use std::sync::{atomic::AtomicU64, Arc};
 use std::{collections::BTreeSet, error::Error};
 use structopt::StructOpt;
 use tokio::time::delay_for;
-use url::Url;
 use tokio_postgres::Statement;
+use url::Url;
 
 #[derive(Debug, StructOpt, Clone)]
 #[structopt(
@@ -30,7 +30,7 @@ struct Opt {
     compute_only: bool,
     #[structopt(short, long)]
     verbose: bool,
-    /// Duration between each print in ms
+    /// Duration between each print in msS
     #[structopt(short, long, default_value = "5000")]
     duration: u64,
     /// if images should be scraped
@@ -42,17 +42,17 @@ struct Opt {
 }
 
 #[derive(Clone)]
-struct PreparedStatements{
-    get_websites : Statement,
-    add_to_websites_v2 : Statement,
-    into_crawl_queue : Statement,
-    into_base_urls : Statement,
+struct PreparedStatements {
+    get_websites: Statement,
+    add_to_websites_v2: Statement,
+    into_crawl_queue: Statement,
+    into_base_urls: Statement,
     update_crawl_queue_finished: Statement,
     error_in_scrape_url_handler: Statement,
-    insert_into_images : Statement,
+    insert_into_images: Statement,
 }
-impl PreparedStatements{
-    async fn new(db_client :&tokio_postgres::Client) -> Result<Self, Box<dyn Error>>{
+impl PreparedStatements {
+    async fn new(db_client: &tokio_postgres::Client) -> Result<Self, Box<dyn Error>> {
         Ok(PreparedStatements {
             get_websites: db_client.prepare("UPDATE crawl_queue_v2 SET status = 'processing' WHERE url = ANY (SELECT url FROM crawl_queue_v2 WHERE status = 'queued' ORDER BY timestamp ASC NULLS FIRST,error_count ASC LIMIT 50) RETURNING * ;").await?,
             add_to_websites_v2: db_client.prepare("WITH before AS (SELECT * FROM websites_v2 WHERE url = $1 ), inserted AS (INSERT INTO websites_v2 (url,text,last_scraped,text_tsvector,hostname) VALUES ($1,$2,NOW(),to_tsvector('english',$2),$3) ON CONFLICT (url) DO UPDATE SET last_scraped = NOW(), text = $2 , text_tsvector = to_tsvector('english',$2) WHERE websites_v2.url = $1) SELECT last_scraped FROM before;").await?,
@@ -74,8 +74,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut scraped_avg: (u64, u64) = (0, 0);
     let error_count = Arc::new(AtomicU64::new(0));
 
-    let (db_client, connection) =
-        tokio_postgres::connect("host=db.failhack.com user=postgres port=5432 password=Rd7rko$g85GV^&%123", NoTls).await?;
+    let (db_client, connection) = tokio_postgres::connect(
+        "host=db.failhack.com user=postgres port=5432 password=Rd7rko$g85GV^&%123",
+        NoTls,
+    )
+    .await?;
     let db_client = Arc::new(db_client);
 
     // The connection object performs the actual communication with the database,
@@ -96,9 +99,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let db_client_unfold = db_client.clone();
     let unfold_opts = opt.clone();
-    let url_worker_fut = futures::stream::unfold( (),|()| async {
+    let url_worker_fut = futures::stream::unfold((), |()| async {
         let mut urls: Vec<url::Url> = vec![];
-        let db_res = db_client_unfold.query(&prepared_statements.get_websites,&[]).await;
+        let db_res = db_client_unfold
+            .query(&prepared_statements.get_websites, &[])
+            .await;
         match db_res {
             Ok(db_ok) => {
                 // println!("{:?}",db_ok)
@@ -110,27 +115,44 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 eprintln!("{}", err);
             }
         }
-        if unfold_opts.verbose{
-            println!("getting {} new urls",urls.len());
+        if unfold_opts.verbose {
+            println!("getting {} new urls", urls.len());
         }
-        Some((iter(urls),()))
-    }).flatten().map(|url| async {
+        Some((iter(urls), ()))
+    })
+    .flatten()
+    .map(|url| async {
         let url = url;
-        match scrape_url(url.clone(),&db_client,unfold_opts.verbose,&prepared_statements,unfold_opts.images).await {
+        match scrape_url(
+            url.clone(),
+            &db_client,
+            unfold_opts.verbose,
+            &prepared_statements,
+            unfold_opts.images,
+        )
+        .await
+        {
             Ok(_) => {
                 scraped_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 scraped_last_duration.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             Err(err) => {
                 if unfold_opts.verbose {
-                    eprintln!("failed to scrape '{}' with error: {}",url.clone(),err);
+                    eprintln!("failed to scrape '{}' with error: {}", url.clone(), err);
                 }
                 // ignore db errors in error handling...
-                let _ = db_client.execute(&prepared_statements.error_in_scrape_url_handler,&[&url.as_str()]).await;
+                let _ = db_client
+                    .execute(
+                        &prepared_statements.error_in_scrape_url_handler,
+                        &[&url.as_str()],
+                    )
+                    .await;
                 error_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         };
-    }).buffer_unordered(unfold_opts.n_workers).for_each(|_| async {});
+    })
+    .buffer_unordered(unfold_opts.n_workers)
+    .for_each(|_| async {});
 
     //weight updater task:
     //let db_weight_updater = db_client.clone();
@@ -181,12 +203,15 @@ async fn scrape_url(
     let host_str = url.host_str().ok_or(core::fmt::Error)?;
     let hostname = Url::parse(&(url.scheme().to_owned() + "://" + host_str + "/"))?;
     // let mut db_client = pool.get().unwrap(); // Why does this fail sometimes ?!
-    if verbose{
-        println!("Scraping: {}",&url);
+    if verbose {
+        println!("Scraping: {}", &url);
     }
 
     // build Client:
-    let web_client = reqwest::ClientBuilder::new().user_agent("Pwnsearch-Scraper/0.4").timeout(std::time::Duration::from_secs(60)).build()?;
+    let web_client = reqwest::ClientBuilder::new()
+        .user_agent("Pwnsearch-Scraper/0.4")
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
 
     // let resp = reqwest::blocking::get(url.as_str())?;
     // let body = std::io::Read::take(resp,1024 * 1024 * 1024);
@@ -195,12 +220,14 @@ async fn scrape_url(
     //let resp = reqwest::get(url.as_str()).await?;
     if verbose {
         //println!("content_length header: {:?}",&resp.content_length());
-        println!("duration it took reqwest = {}ms",now.elapsed().as_millis());
+        println!("duration it took reqwest = {}ms", now.elapsed().as_millis());
     }
     let body: Vec<u8> = resp
         .bytes_stream()
         .try_fold(Vec::new(), |mut body, chunk| {
-            if body.len() < 1024 * 1024 /* 1024 */{
+            if body.len() < 1024 * 1024
+            /* 1024 */
+            {
                 body.extend(&chunk);
             }
             async { Ok(body) }
@@ -267,43 +294,57 @@ async fn scrape_url(
         text_string.push_str(" ");
         text_string.push_str(&string);
     }
-    if verbose{
-        println!("text string for '{}' has len: {}, min with 10k: {}",&url,text_string.len(),text_string.chars().map(|_| 1).sum::<usize>().min(10000));
+    if verbose {
+        println!(
+            "text string for '{}' has len: {}, min with 10k: {}",
+            &url,
+            text_string.len(),
+            text_string.chars().map(|_| 1).sum::<usize>().min(10000)
+        );
     }
     // url,alt-text
-    if images{
+    if images {
         if verbose {
             println!("images!");
         }
-        let all_images: Vec<(String,String)> = document.find(Name("img")).filter_map(|img| { 
-            let img_url_res = img.attr("src");
-            match img_url_res{
-                Some(img_url) => {
-                    let img_text = img.attr("alt");
-                    let img_url_final = if img_url.starts_with("http") {
-                        Url::parse(img_url)
-                    } else {
-                        url.join(img_url)
-                    };
+        let all_images: Vec<(String, String)> = document
+            .find(Name("img"))
+            .filter_map(|img| {
+                let img_url_res = img.attr("src");
+                match img_url_res {
+                    Some(img_url) => {
+                        let img_text = img.attr("alt");
+                        let img_url_final = if img_url.starts_with("http") {
+                            Url::parse(img_url)
+                        } else {
+                            url.join(img_url)
+                        };
 
-                    match img_url_final {
-                        Ok(img_url) => {
-                            //println!("image url: '{}' , text: '{}'",img_url.as_str().to_owned(),img_text.unwrap_or("").to_owned());
-                            Some((img_url.as_str().to_owned(),img_text.unwrap_or("").to_owned()))
-                        }
-                        Err(_) => {
-                            None
+                        match img_url_final {
+                            Ok(img_url) => {
+                                //println!("image url: '{}' , text: '{}'",img_url.as_str().to_owned(),img_text.unwrap_or("").to_owned());
+                                Some((
+                                    img_url.as_str().to_owned(),
+                                    img_text.unwrap_or("").to_owned(),
+                                ))
+                            }
+                            Err(_) => None,
                         }
                     }
+                    _ => None,
                 }
-                _ => {None}
-            }
-        }).collect();
+            })
+            .collect();
         for image in all_images {
             if verbose {
-                println!("image (link,text) pair{:?}",image);
+                println!("image (link,text) pair{:?}", image);
             }
-            db_client.execute(&prepared_statements.insert_into_images, &[&image.0,&image.1]).await?;
+            db_client
+                .execute(
+                    &prepared_statements.insert_into_images,
+                    &[&image.0, &image.1],
+                )
+                .await?;
         }
     }
     // let re = regex::Regex::new(r"/\s\s+/g").unwrap();
@@ -311,7 +352,21 @@ async fn scrape_url(
     // MEM 'leak' after here:
 
     // ADD to websites_v2
-    db_client.query(&prepared_statements.add_to_websites_v2,&[&url.as_str(),&(text_string.get(..(text_string.chars().map(|_| 1).sum::<usize>()).min(10000)).ok_or("")?.to_owned() + " " + url.as_str()),&hostname.as_str()]).await?;
+    db_client
+        .query(
+            &prepared_statements.add_to_websites_v2,
+            &[
+                &url.as_str(),
+                &(text_string
+                    .get(..(text_string.chars().map(|_| 1).sum::<usize>()).min(10000))
+                    .ok_or("")?
+                    .to_owned()
+                    + " "
+                    + url.as_str()),
+                &hostname.as_str(),
+            ],
+        )
+        .await?;
 
     // make target base urls
     let target_base_urls: BTreeSet<Url> = new_urls
@@ -330,14 +385,19 @@ async fn scrape_url(
 
     // insert into crawl_queue_v2 with timestamp NULL
     if verbose {
-        println!("into crawl_queue_v2, num: {}",new_urls.len());   
+        println!("into crawl_queue_v2, num: {}", new_urls.len());
     }
     for new_url in new_urls {
-        db_client.execute(&prepared_statements.into_crawl_queue,&[&new_url.as_str(),&"queued"]).await?;
+        db_client
+            .execute(
+                &prepared_statements.into_crawl_queue,
+                &[&new_url.as_str(), &"queued"],
+            )
+            .await?;
     }
 
     if verbose {
-        println!("into base_url_links, num: {}",target_base_urls.len());
+        println!("into base_url_links, num: {}", target_base_urls.len());
     }
     // insert into base_url_links
     for target_url in target_base_urls {
@@ -350,10 +410,19 @@ async fn scrape_url(
             continue;
         }
         if verbose {
-            println!("{}",target_url);
+            println!("{}", target_url);
         }
-        let db_res = db_client.query(&prepared_statements.into_base_urls,
-           &[&Url::parse(&(url.scheme().to_owned() + "://" + url.host_str().unwrap() + "/")).unwrap().as_str(),&target_url.as_str()]).await;
+        let db_res = db_client
+            .query(
+                &prepared_statements.into_base_urls,
+                &[
+                    &Url::parse(&(url.scheme().to_owned() + "://" + url.host_str().unwrap() + "/"))
+                        .unwrap()
+                        .as_str(),
+                    &target_url.as_str(),
+                ],
+            )
+            .await;
         match db_res {
             Ok(_) => {
                 //println!("{:?}",db_ok);
@@ -362,13 +431,18 @@ async fn scrape_url(
                 if verbose {
                     eprintln!("{}", err);
                 }
-                    continue;
+                continue;
             }
         }
     }
 
     // Update crawl_queue_v2 to say finishged crawling back in queue with timestamp now
-    db_client.execute(&prepared_statements.update_crawl_queue_finished,&[&url.as_str()]).await?;
+    db_client
+        .execute(
+            &prepared_statements.update_crawl_queue_finished,
+            &[&url.as_str()],
+        )
+        .await?;
 
     Ok(())
 }
