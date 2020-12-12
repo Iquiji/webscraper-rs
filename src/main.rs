@@ -60,7 +60,7 @@ impl PreparedStatements {
             into_base_urls : db_client.prepare("WITH inserted AS ( INSERT INTO base_url_links (base_url,target_url) VALUES ($1,$2) ON CONFLICT (base_url,target_url) DO NOTHING RETURNING target_url) UPDATE websites_v2 SET popularity = websites_v2.popularity + 1 FROM inserted WHERE hostname = inserted.target_url;").await?,
             update_crawl_queue_finished : db_client.prepare("UPDATE crawl_queue_v2 SET status = 'queued' , timestamp = current_timestamp WHERE url = $1;").await?,
             error_in_scrape_url_handler : db_client.prepare("UPDATE crawl_queue_v2 SET status = 'queued' , error_count = crawl_queue_v2.error_count + 1 WHERE url = $1").await?,
-            insert_into_images : db_client.prepare("INSERT INTO images (url,text,text_tsvector) VALUES ($1,$2,to_tsvector('english',$2)) ON CONFLICT DO NOTHING;").await?,
+            insert_into_images : db_client.prepare("INSERT INTO images (url,text,text_tsvector,from_url) VALUES ($1,$2,to_tsvector('english',$2),$3) ON CONFLICT DO NOTHING;").await?,
         })
     }
 }
@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let error_count = Arc::new(AtomicU64::new(0));
 
     let (db_client, connection) = tokio_postgres::connect(
-        "host=db.failhack.com user=postgres port=5432 password=Rd7rko$g85GV^&%123",
+        "host=db.failhack.com user=postgres port=5432 password=Rd7rko$g85GV^&%123 application_name=web_spider keepalive_idle=5",
         NoTls,
     )
     .await?;
@@ -351,7 +351,7 @@ async fn scrape_url(
             let _ = db_client
                 .execute(
                     &prepared_statements.insert_into_images,
-                    &[&image.0, &image.1],
+                    &[&image.0, &image.1,&url.as_str()],
                 )
                 .await;
         }
